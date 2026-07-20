@@ -1,6 +1,5 @@
 # Deployment profile for SP_Tracking SPV5-1 actors (8199-D input).
-# Copy the exported policy.onnx and policy.json into ckpts/G1_SPV5_1/.
-policy_path: "ckpts/G1_SPV5_1/policy.onnx"
+policy_path: "/home/lenovo/workspace/UNICTL/SP_Tracking/logs/ckpts/0720/policy.onnx"
 actor_profile: "spv5_1"
 use_policy_metadata: true
 # SP_Tracking exporters before the full deployment-metadata update omit these
@@ -66,8 +65,10 @@ motions:
   - {name: "walk1_subject1", path: "motions/walk1_subject1.npz", start: 0, end: -1}
   - {name: "walk2_subject1", path: "motions/walk2_subject1.npz", start: 0, end: -1}
   - {name: "walk3_subject1", path: "motions/walk3_subject1.npz", start: 0, end: -1}
-  # Direct Sonic/IsaacLab example (absolute paths are supported):
-  # - {name: "flip_360_001__A304", path: "/path/to/flip_360_001__A304.npz", start: 0, end: -1}
+  # Repository-bundled IsaacLab/Sonic motions. Paths are relative to this YAML.
+  - {name: "jumps1_subject1", path: "../../../motion/jumps1_subject1.npz", start: 0, end: -1}
+  - {name: "flip_360_001__A304", path: "../../../motion/flip_360_001__A304.npz", start: 0, end: -1}
+  - {name: "dance1_subject2_0_3945", path: "../../../motion/dance1_subject2_0_3945.npz", start: 0, end: -1}
 
 motion_clips:
   - name: "default"

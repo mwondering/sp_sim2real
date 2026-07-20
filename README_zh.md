@@ -23,6 +23,8 @@ sim2real/
   config/l7/           L7 控制、策略、MuJoCo、motion 与重定向配置
   teleop/              XR/PICO 实时遥操作桥接程序
 
+motion/                 仓库自带的 IsaacLab/Sonic NPZ motion
+
 g1_sim2real/
   src/                 G1 C++ UDP/DDS 底层桥接程序
   config/              G1 桥接配置
@@ -43,14 +45,7 @@ uv sync
 
 ## 快速开始：SPV5-1 + IsaacLab/Sonic motion
 
-下面以已经完成回归测试的 SPV5-1 checkpoint 和 Sonic motion 为例。建议复制一份本地配置，避免把本机绝对路径写入通用配置：
-
-```bash
-cd <repo>/sim2real
-cp config/g1/tracking_spv5_1.yaml config/g1/tracking_spv5_1_local.yaml
-```
-
-编辑 `config/g1/tracking_spv5_1_local.yaml` 中的 checkpoint 和 motion：
+仓库中的 `config/g1/tracking_spv5_1.yaml` 已经直接配置好当前 SPV5-1 checkpoint 和三条内置 motion，无需复制配置文件。关键配置如下：
 
 ```yaml
 policy_path: "/home/lenovo/workspace/UNICTL/SP_Tracking/logs/ckpts/0720/policy.onnx"
@@ -68,13 +63,21 @@ motion_source:
     port: 28562
 
 motions:
+  - name: "jumps1_subject1"
+    path: "../../../motion/jumps1_subject1.npz"
+    start: 0
+    end: -1
   - name: "flip_360_001__A304"
-    path: "/home/lenovo/DATASETS/sonic_filtered/230324/flip_360_001__A304.npz"
+    path: "../../../motion/flip_360_001__A304.npz"
+    start: 0
+    end: -1
+  - name: "dance1_subject2_0_3945"
+    path: "../../../motion/dance1_subject2_0_3945.npz"
     start: 0
     end: -1
 ```
 
-不要删除原配置中的 `policy_metadata_fallback`、`future_steps`、`motion_clips` 和 `dataset_joint_names`。旧版 SPV5-1 导出的 `policy.json` 可以缺少关节、动作缩放和 PD 参数，但仍需保留与 `policy.onnx` 同名且同目录的 sidecar；仓库配置只补齐缺失的部署字段，不覆盖 sidecar 已提供的字段。
+旧版 SPV5-1 导出的 `policy.json` 可以缺少关节、动作缩放和 PD 参数，但仍需保留与 `policy.onnx` 同名且同目录的 sidecar；仓库配置只补齐缺失的部署字段，不覆盖 sidecar 已提供的字段。如果 checkpoint 位置发生变化，只需修改原始 `tracking_spv5_1.yaml` 中的 `policy_path`。
 
 打开三个终端。
 
@@ -89,14 +92,14 @@ uv run src/sim2sim.py --robot g1
 
 ```bash
 cd <repo>/sim2real
-uv run src/deploy.py --robot g1 --tracking-config tracking_spv5_1_local.yaml
+uv run src/deploy.py --robot g1 --tracking-config tracking_spv5_1.yaml
 ```
 
 终端 3，启动 motion 选择器：
 
 ```bash
 cd <repo>/sim2real
-uv run src/motion_select.py --robot g1 --tracking-config tracking_spv5_1_local.yaml
+uv run src/motion_select.py --robot g1 --tracking-config tracking_spv5_1.yaml
 ```
 
 启动后的操作顺序如下：
