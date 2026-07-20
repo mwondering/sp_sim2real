@@ -7,6 +7,8 @@ This branch supports:
 - G1 sim2sim
 - L7 sim2sim
 - G1 sim2real
+- G1 SP_Tracking WBTeleop actor deployment
+- G1 SP_Tracking SPV5-1 actor deployment
 
 It does not include training code or dataset generation code.
 The L7 hardware sim2real bridge is not part of this branch.
@@ -61,6 +63,29 @@ The default `config/g1/tracking.yaml` uses `G1_PMG`.
 To run the G1 compliance policy, use `config/g1/tracking_compliance.yaml`.
 The compliance YAML switches the policy path, removes future steps `5` and `6`,
 and enables the compliance flag observation.
+
+### SP_Tracking actor checkpoints
+
+The runtime also accepts deployment exports produced by the sibling
+`SP_Tracking` repository. Copy both files from a trained run (they must come
+from the same checkpoint):
+
+```text
+<SP_Tracking run>/policy.onnx
+<SP_Tracking run>/policy.json
+```
+
+Use one of these destinations:
+
+```text
+sim2real/config/g1/ckpts/G1_WBTeleop/     # WBTeleop actor
+sim2real/config/g1/ckpts/G1_SPV5_1/      # SPV5-1 actor
+```
+
+`policy.json` supplies the canonical joint order, action scale, default pose,
+stiffness, and damping used during training. The runtime validates the ONNX
+input width against the selected actor profile (886 for WBTeleop, 8199 for
+SPV5-1).
 
 ## Common Setup
 
@@ -201,6 +226,21 @@ For G1 compliance instead of default G1 PMG:
 ```bash
 uv run src/deploy.py --robot g1 --tracking-config tracking_compliance.yaml
 ```
+
+For an exported SP_Tracking actor:
+
+```bash
+# WBTeleop actor
+uv run src/deploy.py --robot g1 --tracking-config tracking_wbteleop.yaml
+
+# SPV5-1 actor
+uv run src/deploy.py --robot g1 --tracking-config tracking_spv5_1.yaml
+```
+
+Use the same `--tracking-config` value with `motion_select.py`. Both actor
+profiles support UDP motion playback and VR input. SPV5-1 additionally requires
+the `tau` feedback field added to this repository's sim2sim and G1 bridge; an
+older bridge is rejected instead of silently feeding zero torque history.
 
 After both terminals are running:
 

@@ -85,6 +85,8 @@ class Sim2Sim:
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.model.opt.timestep = self.low_level_dt
         self.data = mujoco.MjData(self.model)
+        self._tau_sum_mujoco = np.zeros(self.model.nu, dtype=np.float64)
+        self._tau_sample_count = 0
 
         self.policy_joint_names = list(_cfg_value(config, "policy_joint_names", "policy_joint_names"))
         self.mujoco_joint_names = list(
@@ -165,6 +167,7 @@ class Sim2Sim:
         self._viewer_tick = 0
         self._physics_tick = 0
         self.viewer_decim = max(1, self.low_level_freq // max(1, self.viewer_fps))
+        self.imu_gyro_adr, self.imu_gyro_dim = self._resolve_sensor_slice("imu_ang_vel")
         self.imu_lin_acc_adr, self.imu_lin_acc_dim = self._resolve_sensor_slice("imu_lin_acc")
 
         signal.signal(signal.SIGINT, self.close)
@@ -258,12 +261,24 @@ class Sim2Sim:
             return np.zeros(3, dtype=np.float32)
         return self.data.sensordata[self.imu_lin_acc_adr : self.imu_lin_acc_adr + 3].copy().astype(np.float32)
 
+    def _gyro(self) -> np.ndarray:
+        if self.imu_gyro_adr is None or self.imu_gyro_dim < 3:
+            return self.data.qvel[3:6].copy().astype(np.float32)
+        return self.data.sensordata[self.imu_gyro_adr : self.imu_gyro_adr + 3].copy().astype(np.float32)
+
     def _publish_state(self):
         with self._sim_lock:
             q = self._mujoco_to_policy(self.data.qpos[7:]).astype(np.float32)
             dq = self._mujoco_to_policy(self.data.qvel[6:]).astype(np.float32)
+            if self._tau_sample_count > 0:
+                tau_mujoco = self._tau_sum_mujoco / float(self._tau_sample_count)
+            else:
+                tau_mujoco = self.data.qfrc_actuator[6:].copy()
+            tau = self._mujoco_to_policy(tau_mujoco).astype(np.float32)
+            self._tau_sum_mujoco[:] = 0.0
+            self._tau_sample_count = 0
             quat = self.data.qpos[3:7].copy().astype(np.float32)
-            gyro = self.data.qvel[3:6].copy().astype(np.float32)
+            gyro = self._gyro()
             linacc = self._linacc()
         self.transport.send_state(
             q=q,
@@ -271,6 +286,7 @@ class Sim2Sim:
             quat_wxyz=quat,
             gyro=gyro,
             linacc=linacc,
+            tau=tau,
             buttons=self._buttons_snapshot(),
             sticks={name: 0.0 for name in STICK_KEYS},
         )
@@ -365,6 +381,8 @@ class Sim2Sim:
                     self.data.ctrl[:] = ctrl
                     self._limit_external_forces()
                     mujoco.mj_step(self.model, self.data)
+                self._tau_sum_mujoco += self.data.qfrc_actuator[6:]
+                self._tau_sample_count += 1
 
             if not self._viewer_sync():
                 break

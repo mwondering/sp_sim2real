@@ -79,6 +79,7 @@ class PolicyRunRecorder:
                 "policy_step": np.int64(controller.policy_step),
                 "joint_pos": controller.qj.astype(np.float32, copy=True),
                 "joint_vel": controller.dqj.astype(np.float32, copy=True),
+                "joint_torque": controller.tau.astype(np.float32, copy=True),
                 "action_delta": np.asarray(action_delta, dtype=np.float32).copy(),
                 "cmd_q": controller.cmd_q.astype(np.float32, copy=True),
                 "cmd_qd": controller.cmd_qd.astype(np.float32, copy=True),

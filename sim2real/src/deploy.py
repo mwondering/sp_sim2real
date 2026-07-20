@@ -73,6 +73,7 @@ class Controller:
             "ry": 0.0,
         }
         self.have_state = False
+        self.have_tau_state = False
         self.last_state_seq: Optional[int] = None
         self.last_state_receive_time_ns: Optional[int] = None
         self.skipped_state_count = 0
@@ -96,9 +97,19 @@ class Controller:
 
         tracking_cfg_path = tracking_config_path(self.args.robot, self.args.tracking_config)
         print(f"[Deploy] tracking config: {tracking_cfg_path}")
-        self.policies = {
-            "tracking": TrackingPolicyRaw("tracking", get_config(tracking_cfg_path), self),
-        }
+        tracking_policy = TrackingPolicyRaw("tracking", get_config(tracking_cfg_path), self)
+        self.policies = {"tracking": tracking_policy}
+        if tracking_policy.controller_default_qpos is not None:
+            self.default_qpos[:] = tracking_policy.controller_default_qpos
+            self.init_qpos[:] = tracking_policy.controller_default_qpos
+            self.kps[:] = tracking_policy.controller_kps
+            self.kds[:] = tracking_policy.controller_kds
+            print("[Deploy] controller pose/gains loaded from policy.json")
+        if tracking_policy.actor_profile == "spv5_1" and not self.have_tau_state:
+            raise RuntimeError(
+                "SPV5-1 requires joint torque feedback, but the bridge state has no 'tau' field. "
+                "Rebuild/restart sim2sim or g1_sim2real from this repository."
+            )
         self.current_policy: Optional[Policy] = None
         self.pending_policy: Optional[Policy] = None
         self.recorder: Optional[PolicyRunRecorder] = None
@@ -110,7 +121,16 @@ class Controller:
         self.low_state = msg
         self.qj[:] = np.asarray(msg["q"], dtype=np.float32)
         self.dqj[:] = np.asarray(msg["dq"], dtype=np.float32)
-        self.tau[:] = 0.0
+        if "tau" in msg:
+            tau = np.asarray(msg["tau"], dtype=np.float32)
+            if tau.shape != self.tau.shape:
+                raise ValueError(
+                    f"Bridge tau shape {tau.shape} does not match controller shape {self.tau.shape}"
+                )
+            self.tau[:] = tau
+            self.have_tau_state = True
+        else:
+            self.tau[:] = 0.0
         self.quat[:] = np.asarray(msg["quat_wxyz"], dtype=np.float32)
         self.gyro[:] = np.asarray(msg["gyro"], dtype=np.float32)
         self.linacc[:] = np.asarray(msg.get("linacc", np.zeros(3, dtype=np.float32)), dtype=np.float32)

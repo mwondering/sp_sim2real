@@ -11,6 +11,22 @@ from common.joint_mapper import JointMapper
 from common.utils import DictToClass
 from runtime.motion_sources import MotionSourceBase, UDPMotionSource, VRMotionSource
 
+
+def _resolve_policy_path(policy_cfg: DictToClass) -> Path:
+    path = Path(policy_cfg.policy_path)
+    config_dir = Path(getattr(policy_cfg, "_config_dir"))
+    return path if path.is_absolute() else (config_dir / path)
+
+
+def _load_policy_sidecar(policy_cfg: DictToClass) -> dict:
+    metadata_path = _resolve_policy_path(policy_cfg).with_suffix(".json")
+    if not metadata_path.exists():
+        raise FileNotFoundError(
+            f"Policy metadata is required but was not found: {metadata_path}"
+        )
+    with metadata_path.open("r") as file:
+        return json.load(file)
+
 def benchmark_onnx(module, sample_input, runs=100, warmup=10, desc=""):
     for _ in range(warmup):
         _ = module(sample_input)
@@ -96,20 +112,29 @@ class Policy:
 
         self.config = policy_cfg
 
-        # Resolve policy path relative to repo root for robustness
-        p = Path(policy_cfg.policy_path)
-        cfg_dir = Path(getattr(policy_cfg, "_config_dir"))
-        self.policy_path = str(p if p.is_absolute() else (cfg_dir / p))
-        self.action_joint_names = list(policy_cfg.action_joint_names)
-        self.action_scale = np.array(policy_cfg.action_scale, dtype=np.float32)
+        self.policy_path = str(_resolve_policy_path(policy_cfg))
+        self.module = ONNXModule(self.policy_path)
+        self.use_policy_metadata = bool(getattr(policy_cfg, "use_policy_metadata", False))
+        metadata = self.module.meta
+
+        if self.use_policy_metadata:
+            if "joint_names" not in metadata or "action_scale" not in metadata:
+                raise ValueError(
+                    f"[Policy:{self.name}] use_policy_metadata=true requires "
+                    "joint_names and action_scale in policy.json"
+                )
+            self.action_joint_names = list(metadata["joint_names"])
+            self.action_scale = np.asarray(metadata["action_scale"], dtype=np.float32)
+        else:
+            self.action_joint_names = list(policy_cfg.action_joint_names)
+            configured_scale = getattr(policy_cfg, "action_scale", metadata.get("action_scaling"))
+            self.action_scale = np.asarray(configured_scale, dtype=np.float32)
         self.action_clip = float(policy_cfg.action_clip)
 
         assert len(self.action_joint_names) == len(self.action_scale), (
             f"[{self.name}] action_joint_names ({len(self.action_joint_names)}) "
             f"!= action_scale ({len(self.action_scale)})"
         )
-
-        self.module = ONNXModule(self.policy_path)
 
         self.mapper_action = JointMapper(
             self.action_joint_names,
@@ -122,6 +147,37 @@ class Policy:
         if map_info['unmapped_to_joints']:
             print(f"[Policy:{self.name}] Unmapped controller joints: {map_info['unmapped_to_joints']}")
 
+        if not hasattr(self, "obs_joint_names"):
+            self.obs_joint_names = list(self.controller.config.policy_joint_names)
+        self.mapper_observation = JointMapper(
+            list(self.obs_joint_names),
+            list(self.controller.config.policy_joint_names),
+        )
+        obs_map_info = self.mapper_observation.get_mapping_info()
+        if obs_map_info["unmapped_from_joints"] or obs_map_info["unmapped_to_joints"]:
+            raise ValueError(
+                f"[Policy:{self.name}] Observation joint mapping is incomplete: {obs_map_info}"
+            )
+
+        self.controller_default_qpos = None
+        self.controller_kps = None
+        self.controller_kds = None
+        if self.use_policy_metadata:
+            self.controller_default_qpos = self._map_metadata_vector(
+                metadata, "default_joint_pos"
+            )
+            self.controller_kps = self._map_metadata_vector(metadata, "joint_stiffness")
+            self.controller_kds = self._map_metadata_vector(metadata, "joint_damping")
+            metadata_joint_names = list(metadata["joint_names"])
+            metadata_to_observation = JointMapper(metadata_joint_names, list(self.obs_joint_names))
+            self.default_joint_pos_obs = metadata_to_observation.map_action_from_to(
+                np.asarray(metadata["default_joint_pos"], dtype=np.float32)
+            ).astype(np.float32)
+        else:
+            self.default_joint_pos_obs = self.mapper_observation.map_state_to_from(
+                np.asarray(self.controller.default_qpos, dtype=np.float32)
+            ).astype(np.float32)
+
         self.policy_input: Optional[Dict[str, np.ndarray]] = None
         self.applied_action = np.zeros(len(self.action_joint_names), dtype=np.float32)
         self.last_action = np.zeros(len(self.action_joint_names), dtype=np.float32)
@@ -133,10 +189,10 @@ class Policy:
         self.num_obs = 0
         self._build_obs_modules()
 
-        self.policy_input = {
-            "policy": np.zeros((1, self.num_obs), dtype=np.float32),
-            "is_init": np.ones((1,), dtype=bool)
-        }
+        if not self.module.in_keys:
+            raise ValueError(f"[Policy:{self.name}] policy.json has no in_keys")
+        self.input_key = self.module.in_keys[0]
+        self.policy_input = self._empty_policy_input()
         input_shape = self.module.ort_session.get_inputs()[0].shape
         expected_obs_dim = input_shape[-1] if len(input_shape) > 0 else None
         if isinstance(expected_obs_dim, int) and expected_obs_dim != self.num_obs:
@@ -145,6 +201,25 @@ class Policy:
                 f"onnx expects {expected_obs_dim}. Please align tracking.yaml observation settings."
             )
         benchmark_onnx(self.module, self.policy_input, runs=100, warmup=200, desc="model@cuda")
+
+    def _map_metadata_vector(self, metadata: dict, key: str) -> np.ndarray:
+        if key not in metadata:
+            raise ValueError(
+                f"[Policy:{self.name}] use_policy_metadata=true requires {key} in policy.json"
+            )
+        values = np.asarray(metadata[key], dtype=np.float32)
+        if values.shape != (len(self.action_joint_names),):
+            raise ValueError(
+                f"[Policy:{self.name}] metadata {key} has shape {values.shape}, "
+                f"expected {(len(self.action_joint_names),)}"
+            )
+        return self.mapper_action.map_action_from_to(values).astype(np.float32)
+
+    def _empty_policy_input(self) -> Dict:
+        result = {self.input_key: np.zeros((1, self.num_obs), dtype=np.float32)}
+        if "is_init" in self.module.in_keys:
+            result["is_init"] = np.ones((1,), dtype=bool)
+        return result
 
     # -------- lifecycle ----------
     def fade_in(self):
@@ -185,11 +260,8 @@ class Policy:
             val = m.compute()
             obs_list.append(val)
         if self.policy_input is None:
-            self.policy_input = {
-                "policy": np.zeros((1, self.num_obs), dtype=np.float32),
-                "is_init": np.ones((1,), dtype=bool),
-            }
-        self.policy_input["policy"][0, :] = np.concatenate(obs_list, axis=0)
+            self.policy_input = self._empty_policy_input()
+        self.policy_input[self.input_key][0, :] = np.concatenate(obs_list, axis=0)
 
     def compute_action(self) -> np.ndarray:
         try:
@@ -200,7 +272,8 @@ class Policy:
 
         if ("next", "adapt_hx") in out:
             self.policy_input["adapt_hx"][:] = out["next", "adapt_hx"]
-        self.policy_input["is_init"][:] = False
+        if "is_init" in self.policy_input:
+            self.policy_input["is_init"][:] = False
 
         action = out["action"].copy()[0].astype(np.float32).clip(-self.action_clip, self.action_clip)
         self.last_action[:] = action
@@ -247,6 +320,14 @@ class TrackingPolicyRaw(Policy):
     def __init__(self, name: str, policy_cfg: DictToClass, controller):
         self.controller = controller
         # ---- Config ---------------------------------------------------------
+        self.actor_profile = (
+            str(getattr(policy_cfg, "actor_profile", "legacy")).strip().lower().replace("-", "_")
+        )
+        if self.actor_profile not in ("legacy", "wbteleop", "spv5_1"):
+            raise ValueError(
+                f"[TrackingPolicyRaw] actor_profile must be legacy, wbteleop, or spv5_1; "
+                f"got {self.actor_profile!r}"
+            )
         self.body_name = "torso_link"
         self.transition_steps = int(getattr(policy_cfg, "transition_steps", 100))
         self.future_steps = self._parse_future_steps(policy_cfg)
@@ -266,7 +347,15 @@ class TrackingPolicyRaw(Policy):
             raise ValueError(
                 "[TrackingPolicyRaw] dataset_joint_names must be provided in tracking.yaml."
             )
-        self.obs_joint_names = controller.config.policy_joint_names
+        if bool(getattr(policy_cfg, "use_policy_metadata", False)):
+            sidecar = _load_policy_sidecar(policy_cfg)
+            if "joint_names" not in sidecar:
+                raise ValueError("use_policy_metadata=true requires joint_names in policy.json")
+            self.obs_joint_names = list(sidecar["joint_names"])
+        else:
+            self.obs_joint_names = list(
+                getattr(policy_cfg, "observation_joint_names", controller.config.policy_joint_names)
+            )
         self.n_joints = len(self.obs_joint_names)
 
         # ---- Reference stream ----------------------------------------------
@@ -306,6 +395,19 @@ class TrackingPolicyRaw(Policy):
         super().deactivate()
 
     def _build_obs_modules(self):
+        if self.actor_profile == "wbteleop":
+            from runtime.observation import WBTeleopActorObservation
+
+            self.obs_modules = [WBTeleopActorObservation(self)]
+            self.num_obs = sum(module.size for module in self.obs_modules)
+            return
+        if self.actor_profile == "spv5_1":
+            from runtime.observation import SPV51ActorObservation
+
+            self.obs_modules = [SPV51ActorObservation(self)]
+            self.num_obs = sum(module.size for module in self.obs_modules)
+            return
+
         from runtime.observation import (
             TrackingCommandObsRaw,
             TargetRootZObs,
@@ -337,6 +439,15 @@ class TrackingPolicyRaw(Policy):
             self.obs_modules.insert(2, ComplianceFlagObs(self))
         self.num_obs = sum(m.size for m in self.obs_modules)
 
+    def current_joint_pos_obs(self) -> np.ndarray:
+        return self.mapper_observation.map_state_to_from(self.controller.qj).astype(np.float32)
+
+    def current_joint_vel_obs(self) -> np.ndarray:
+        return self.mapper_observation.map_state_to_from(self.controller.dqj).astype(np.float32)
+
+    def current_joint_torque_obs(self) -> np.ndarray:
+        return self.mapper_observation.map_state_to_from(self.controller.tau).astype(np.float32)
+
     def request_motion(self, name: str) -> bool:
         request_fn = getattr(self.source, "request_motion", None)
         if callable(request_fn):
@@ -351,7 +462,7 @@ class TrackingPolicyRaw(Policy):
         super().update_obs()
 
     def read_current_state(self) -> Dict[str, np.ndarray]:
-        q_policy = self.controller.qj.copy().astype(np.float32)
+        q_policy = self.current_joint_pos_obs()
 
         if self.ref_root_pos is not None:
             root_pos = self.ref_root_pos[self.ref_idx]

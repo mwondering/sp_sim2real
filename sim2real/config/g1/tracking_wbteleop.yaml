@@ -1,0 +1,46 @@
+# Deployment profile for SP_Tracking WBTeleop actors (886-D input).
+# Copy the exported policy.onnx and policy.json into ckpts/G1_WBTeleop/.
+policy_path: "ckpts/G1_WBTeleop/policy.onnx"
+actor_profile: "wbteleop"
+use_policy_metadata: true
+kinematics_xml_path: "assets/g1.xml"
+reference_fps: 50.0
+future_steps: [0, 1, 2, 3, -1, -2, -3, -4]
+switch_tail_keep_steps: 4
+ref_max_len: 4096
+
+motion_source:
+  type: "udp"
+  udp:
+    enable: true
+    host: "127.0.0.1"
+    port: 28562
+  vr:
+    req_addr: "tcp://127.0.0.1:28701"
+    rep_addr: "tcp://127.0.0.1:28702"
+    ctrl_addr: "tcp://127.0.0.1:28703"
+    low_watermark: 4
+    high_watermark: 7
+    inflight_lifetime_steps: 0
+
+motions:
+  - {name: "walk1_subject1", path: "motions/walk1_subject1.npz", start: 0, end: -1}
+  - {name: "walk2_subject1", path: "motions/walk2_subject1.npz", start: 0, end: -1}
+  - {name: "walk3_subject1", path: "motions/walk3_subject1.npz", start: 0, end: -1}
+
+motion_clips:
+  - name: "default"
+    # SP_Tracking's KNEES_BENT_KEYFRAME in canonical MuJoCo joint order.
+    joint_pos: [-0.312, 0.0, 0.0, 0.669, -0.363, 0.0, -0.312, 0.0, 0.0, 0.669, -0.363, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0, 0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0]
+    root_quat: [1.0, 0.0, 0.0, 0.0]
+    root_pos: [0.0, 0.0, 0.76]
+
+dataset_joint_names: &canonical_joint_names
+  [left_hip_pitch_joint, left_hip_roll_joint, left_hip_yaw_joint, left_knee_joint, left_ankle_pitch_joint, left_ankle_roll_joint,
+   right_hip_pitch_joint, right_hip_roll_joint, right_hip_yaw_joint, right_knee_joint, right_ankle_pitch_joint, right_ankle_roll_joint,
+   waist_yaw_joint, waist_roll_joint, waist_pitch_joint,
+   left_shoulder_pitch_joint, left_shoulder_roll_joint, left_shoulder_yaw_joint, left_elbow_joint, left_wrist_roll_joint, left_wrist_pitch_joint, left_wrist_yaw_joint,
+   right_shoulder_pitch_joint, right_shoulder_roll_joint, right_shoulder_yaw_joint, right_elbow_joint, right_wrist_roll_joint, right_wrist_pitch_joint, right_wrist_yaw_joint]
+
+# These values come from policy.json when use_policy_metadata=true.
+action_clip: 10.0

@@ -1,8 +1,16 @@
 import numpy as np
 from scipy.spatial.transform import Rotation as R
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from runtime.math_utils import _clamp_indices, _quat_apply_inv
+from runtime.kinematics import (
+    RobotKinematics,
+    angular_velocity_from_quaternions_wxyz,
+    joint_velocity_from_positions,
+    quat_to_rot6d_wxyz,
+    smooth_avg5,
+)
 
 if TYPE_CHECKING:
     from runtime.policy import Policy
@@ -348,3 +356,259 @@ class ComplianceFlagObs(BaseObs):
 
     def compute(self):
         return np.array([self.v, self.v * self.force_threshold, self.v * self.kp], dtype=np.float32)
+
+
+class _ChronologicalHistory:
+    """MJLab-compatible history: oldest-to-newest with first-frame backfill."""
+
+    def __init__(self, length: int, width: int):
+        self.length = int(length)
+        self.width = int(width)
+        if self.length <= 0 or self.width <= 0:
+            raise ValueError("History length and width must be positive")
+        self.values = np.zeros((self.length, self.width), dtype=np.float32)
+        self.initialized = False
+
+    def reset(self) -> None:
+        self.values[:] = 0.0
+        self.initialized = False
+
+    def append(self, value: np.ndarray) -> None:
+        value = np.asarray(value, dtype=np.float32).reshape(self.width)
+        if not self.initialized:
+            self.values[:] = value
+            self.initialized = True
+            return
+        self.values[:-1] = self.values[1:]
+        self.values[-1] = value
+
+    def flat(self) -> np.ndarray:
+        return self.values.reshape(-1)
+
+
+def _resolve_kinematics_path(policy) -> Path:
+    raw_path = Path(str(_require_cfg(policy, "kinematics_xml_path")))
+    if raw_path.is_absolute():
+        return raw_path
+    return (Path(getattr(policy.config, "_config_dir")) / raw_path).resolve()
+
+
+def _reference_indices(policy, offsets) -> np.ndarray:
+    if policy.ref_len <= 0:
+        raise ValueError("Reference data is not available yet")
+    return _clamp_indices(policy.ref_idx + np.asarray(tuple(offsets), dtype=np.int32), policy.ref_len)
+
+
+def _reference_joint_velocity_at_current(policy, fps: float) -> np.ndarray:
+    # Centered difference + replicated-boundary avg5 at t=0 needs [-3, +3].
+    indices = _reference_indices(policy, range(-3, 4))
+    return joint_velocity_from_positions(policy.ref_joint_pos[indices], fps)[3]
+
+
+def _reference_root_ang_vel_at_current(policy, fps: float) -> np.ndarray:
+    indices = _reference_indices(policy, range(-3, 4))
+    angular = angular_velocity_from_quaternions_wxyz(policy.ref_root_quat[indices], fps)
+    return smooth_avg5(angular)[3]
+
+
+class WBTeleopActorObservation(BaseObs):
+    """Exact 886-D WBTeleop actor layout from SP_Tracking."""
+
+    LIMB_NAMES = (
+        "left_wrist_yaw_link",
+        "right_wrist_yaw_link",
+        "left_ankle_roll_link",
+        "right_ankle_roll_link",
+    )
+    SIZE = 886
+
+    def __init__(self, policy):
+        self.policy = policy
+        self.ctrl = policy.controller
+        self.fps = float(getattr(policy.config, "reference_fps", 50.0))
+        self.kinematics = RobotKinematics(
+            _resolve_kinematics_path(policy),
+            policy.obs_joint_names,
+        )
+        joint_count = len(policy.obs_joint_names)
+        if joint_count != 29:
+            raise ValueError(f"WBTeleop expects 29 observation joints, got {joint_count}")
+
+        self.ref_limb_history = _ChronologicalHistory(5, 4 * 9)
+        self.robot_limb_history = _ChronologicalHistory(5, 4 * 9)
+        self.gravity_history = _ChronologicalHistory(5, 3)
+        self.gyro_history = _ChronologicalHistory(5, 3)
+        self.joint_pos_history = _ChronologicalHistory(5, joint_count)
+        self.joint_vel_history = _ChronologicalHistory(5, joint_count)
+        self.action_history = _ChronologicalHistory(5, joint_count)
+        self._value = np.zeros(self.SIZE, dtype=np.float32)
+
+    @property
+    def size(self) -> int:
+        return self.SIZE
+
+    @staticmethod
+    def _pack_limb_pose(pos: np.ndarray, quat: np.ndarray) -> np.ndarray:
+        return np.concatenate((pos, quat_to_rot6d_wxyz(quat)), axis=-1).reshape(-1).astype(np.float32)
+
+    def reset(self) -> None:
+        for history in (
+            self.ref_limb_history,
+            self.robot_limb_history,
+            self.gravity_history,
+            self.gyro_history,
+            self.joint_pos_history,
+            self.joint_vel_history,
+            self.action_history,
+        ):
+            history.reset()
+        self._value[:] = 0.0
+
+    def update(self) -> None:
+        joint_pos = self.policy.current_joint_pos_obs()
+        joint_vel = self.policy.current_joint_vel_obs()
+        joint_pos_rel = joint_pos - self.policy.default_joint_pos_obs
+        gravity = _quat_apply_inv(
+            self.ctrl.quat,
+            np.asarray([0.0, 0.0, -1.0], dtype=np.float32),
+        ).astype(np.float32)
+
+        ref_pos, ref_quat = self.kinematics.body_pose(
+            self.policy.ref_joint_pos[self.policy.ref_idx],
+            self.LIMB_NAMES,
+        )
+        robot_pos, robot_quat = self.kinematics.body_pose(joint_pos, self.LIMB_NAMES)
+        self.ref_limb_history.append(self._pack_limb_pose(ref_pos, ref_quat))
+        self.robot_limb_history.append(self._pack_limb_pose(robot_pos, robot_quat))
+        self.gravity_history.append(gravity)
+        self.gyro_history.append(self.ctrl.gyro)
+        self.joint_pos_history.append(joint_pos_rel)
+        self.joint_vel_history.append(joint_vel)
+        self.action_history.append(self.policy.last_action)
+
+        command = np.concatenate(
+            (
+                self.policy.ref_joint_pos[self.policy.ref_idx],
+                _reference_joint_velocity_at_current(self.policy, self.fps),
+            )
+        )
+        self._value = np.concatenate(
+            (
+                command,
+                self.ref_limb_history.flat(),
+                _reference_root_ang_vel_at_current(self.policy, self.fps),
+                self.robot_limb_history.flat(),
+                self.gravity_history.flat(),
+                self.gyro_history.flat(),
+                self.joint_pos_history.flat(),
+                self.joint_vel_history.flat(),
+                self.action_history.flat(),
+            )
+        ).astype(np.float32)
+        if self._value.size != self.SIZE:
+            raise RuntimeError(f"WBTeleop observation has {self._value.size} values, expected {self.SIZE}")
+
+    def compute(self) -> np.ndarray:
+        return self._value
+
+
+class SPV51ActorObservation(BaseObs):
+    """Exact 8199-D flattened deployment input for the SPV5-1 ONNX actor."""
+
+    REFERENCE_STEPS = tuple(range(-42, 8))
+    HISTORY_LENGTH = 50
+    KEY_BODY_DIM = 13 * (3 + 6 + 3 + 3)
+    SIZE = 4 + HISTORY_LENGTH * (29 + 29 + 3 + 3 + 29 + 29) + 50 * 38 + KEY_BODY_DIM
+
+    def __init__(self, policy):
+        self.policy = policy
+        self.ctrl = policy.controller
+        self.kinematics = RobotKinematics(
+            _resolve_kinematics_path(policy),
+            policy.obs_joint_names,
+        )
+        joint_count = len(policy.obs_joint_names)
+        if joint_count != 29:
+            raise ValueError(f"SPV5-1 expects 29 observation joints, got {joint_count}")
+
+        self.joint_pos_history = _ChronologicalHistory(self.HISTORY_LENGTH, joint_count)
+        self.joint_vel_history = _ChronologicalHistory(self.HISTORY_LENGTH, joint_count)
+        self.gravity_history = _ChronologicalHistory(self.HISTORY_LENGTH, 3)
+        self.gyro_history = _ChronologicalHistory(self.HISTORY_LENGTH, 3)
+        self.action_history = _ChronologicalHistory(self.HISTORY_LENGTH, joint_count)
+        self.torque_history = _ChronologicalHistory(self.HISTORY_LENGTH, joint_count)
+        self._value = np.zeros(self.SIZE, dtype=np.float32)
+
+    @property
+    def size(self) -> int:
+        return self.SIZE
+
+    def reset(self) -> None:
+        for history in (
+            self.joint_pos_history,
+            self.joint_vel_history,
+            self.gravity_history,
+            self.gyro_history,
+            self.action_history,
+            self.torque_history,
+        ):
+            history.reset()
+        self._value[:] = 0.0
+
+    def update(self) -> None:
+        joint_pos = self.policy.current_joint_pos_obs()
+        joint_vel = self.policy.current_joint_vel_obs()
+        torque = self.policy.current_joint_torque_obs()
+        gravity = _quat_apply_inv(
+            self.ctrl.quat,
+            np.asarray([0.0, 0.0, -1.0], dtype=np.float32),
+        ).astype(np.float32)
+
+        self.joint_pos_history.append(joint_pos - self.policy.default_joint_pos_obs)
+        self.joint_vel_history.append(joint_vel)
+        self.gravity_history.append(gravity)
+        self.gyro_history.append(self.ctrl.gyro)
+        self.action_history.append(self.policy.last_action)
+        self.torque_history.append(torque)
+
+        indices = _reference_indices(self.policy, self.REFERENCE_STEPS)
+        reference_frame = np.concatenate(
+            (
+                self.policy.ref_root_pos[indices],
+                quat_to_rot6d_wxyz(self.policy.ref_root_quat[indices]),
+                self.policy.ref_joint_pos[indices],
+            ),
+            axis=-1,
+        ).reshape(-1)
+        robot_key_body = self.kinematics.semantic_keypoint_state(
+            joint_pos,
+            joint_vel,
+            self.ctrl.gyro,
+        )
+        if robot_key_body.size != self.KEY_BODY_DIM:
+            raise RuntimeError(
+                f"SPV5-1 robot key-body state has {robot_key_body.size} values, "
+                f"expected {self.KEY_BODY_DIM}"
+            )
+
+        # The export wrapper slices this exact group order:
+        # robot_root_quat, term-major estimator_history, reference input,
+        # robot_key_body.
+        self._value = np.concatenate(
+            (
+                np.asarray(self.ctrl.quat, dtype=np.float32),
+                self.joint_pos_history.flat(),
+                self.joint_vel_history.flat(),
+                self.gravity_history.flat(),
+                self.gyro_history.flat(),
+                self.action_history.flat(),
+                self.torque_history.flat(),
+                reference_frame,
+                robot_key_body,
+            )
+        ).astype(np.float32)
+        if self._value.size != self.SIZE:
+            raise RuntimeError(f"SPV5-1 observation has {self._value.size} values, expected {self.SIZE}")
+
+    def compute(self) -> np.ndarray:
+        return self._value

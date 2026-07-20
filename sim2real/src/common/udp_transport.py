@@ -80,11 +80,12 @@ def _state_payload(
     quat_wxyz: np.ndarray,
     gyro: np.ndarray,
     linacc: np.ndarray,
+    tau: np.ndarray | None,
     buttons: dict[str, bool],
     sticks: dict[str, float],
     state_receive_time_ns: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "q": np.asarray(q, dtype=np.float32),
         "dq": np.asarray(dq, dtype=np.float32),
         "quat_wxyz": np.asarray(quat_wxyz, dtype=np.float32),
@@ -94,6 +95,9 @@ def _state_payload(
         "sticks": sticks,
         "state_receive_time_ns": int(time.perf_counter_ns() if state_receive_time_ns is None else state_receive_time_ns),
     }
+    if tau is not None:
+        payload["tau"] = np.asarray(tau, dtype=np.float32)
+    return payload
 
 
 class UDPRobotHigh:
@@ -178,6 +182,7 @@ class UDPRobotLow:
         quat_wxyz: np.ndarray,
         gyro: np.ndarray,
         linacc: np.ndarray,
+        tau: np.ndarray | None = None,
         buttons: dict[str, bool],
         sticks: dict[str, float],
         state_receive_time_ns: int | None = None,
@@ -189,6 +194,7 @@ class UDPRobotLow:
                 quat_wxyz=quat_wxyz,
                 gyro=gyro,
                 linacc=linacc,
+                tau=tau,
                 buttons=buttons,
                 sticks=sticks,
                 state_receive_time_ns=state_receive_time_ns,

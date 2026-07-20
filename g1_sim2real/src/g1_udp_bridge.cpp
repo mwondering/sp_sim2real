@@ -318,6 +318,7 @@ struct BridgeConfig {
 
 struct StateSnapshot {
   LowState low_state;
+  std::vector<float> tau_real_average;
 };
 
 BridgeConfig load_config(const std::string & path)
@@ -526,19 +527,22 @@ class UdpLatestSender {
   }
 
   void send_state(
-      const std::vector<float> & q, const std::vector<float> & dq, const std::vector<float> & quat,
+      const std::vector<float> & q, const std::vector<float> & dq, const std::vector<float> & tau,
+      const std::vector<float> & quat,
       const std::vector<float> & gyro, const std::vector<float> & linacc, const RemoteState & remote)
   {
     std::vector<uint8_t> payload;
-    payload.reserve((q.size() + dq.size() + quat.size() + gyro.size() + linacc.size()) * sizeof(float));
+    payload.reserve((q.size() + dq.size() + tau.size() + quat.size() + gyro.size() + linacc.size()) * sizeof(float));
     const PackedArray q_ref = append_float_array(payload, q);
     const PackedArray dq_ref = append_float_array(payload, dq);
+    const PackedArray tau_ref = append_float_array(payload, tau);
     const PackedArray quat_ref = append_float_array(payload, quat);
     const PackedArray gyro_ref = append_float_array(payload, gyro);
     const PackedArray linacc_ref = append_float_array(payload, linacc);
 
     std::ostringstream meta;
     meta << "{\"q\":" << ndarray_meta(q_ref) << ",\"dq\":" << ndarray_meta(dq_ref)
+         << ",\"tau\":" << ndarray_meta(tau_ref)
          << ",\"quat_wxyz\":" << ndarray_meta(quat_ref) << ",\"gyro\":" << ndarray_meta(gyro_ref)
          << ",\"linacc\":" << ndarray_meta(linacc_ref) << ",\"buttons\":{"
          << "\"start\":" << bool_text(remote.start) << ",\"stop\":" << bool_text(remote.stop)
@@ -1114,6 +1118,7 @@ class G1UdpBridge {
     if (!tick_decision.unique) {
       return false;
     }
+    accumulate_joint_torque(low_state);
 
     if (!have_lowstate_.load(std::memory_order_relaxed)) {
       {
@@ -1124,7 +1129,7 @@ class G1UdpBridge {
     }
 
     if (allow_tick_publish && tick_decision.publish_now) {
-      enqueue_state_snapshot(low_state);
+      enqueue_state_snapshot(low_state, consume_joint_torque_average());
     }
     return true;
   }
@@ -1199,7 +1204,35 @@ class G1UdpBridge {
     g_stop_requested.store(true, std::memory_order_relaxed);
   }
 
-  void enqueue_state_snapshot(const LowState & low_state)
+  void accumulate_joint_torque(const LowState & low_state)
+  {
+    std::lock_guard<std::mutex> lock(torque_accumulator_mutex_);
+    if (torque_sum_real_.size() != cfg_.real_joint_names.size()) {
+      torque_sum_real_.assign(cfg_.real_joint_names.size(), 0.0);
+      torque_sample_count_ = 0;
+    }
+    for (size_t index = 0; index < cfg_.real_joint_names.size(); ++index) {
+      torque_sum_real_[index] += static_cast<double>(low_state.motor_state().at(index).tau_est());
+    }
+    ++torque_sample_count_;
+  }
+
+  std::vector<float> consume_joint_torque_average()
+  {
+    std::lock_guard<std::mutex> lock(torque_accumulator_mutex_);
+    std::vector<float> average(cfg_.real_joint_names.size(), 0.0f);
+    if (torque_sample_count_ > 0 && torque_sum_real_.size() == average.size()) {
+      const double denominator = static_cast<double>(torque_sample_count_);
+      for (size_t index = 0; index < average.size(); ++index) {
+        average[index] = static_cast<float>(torque_sum_real_[index] / denominator);
+      }
+    }
+    torque_sum_real_.assign(cfg_.real_joint_names.size(), 0.0);
+    torque_sample_count_ = 0;
+    return average;
+  }
+
+  void enqueue_state_snapshot(const LowState & low_state, std::vector<float> tau_real_average)
   {
     bool should_notify = false;
     {
@@ -1210,7 +1243,7 @@ class G1UdpBridge {
       if (pending_state_snapshot_) {
         state_snapshot_overwrite_count_.fetch_add(1, std::memory_order_relaxed);
       }
-      pending_state_snapshot_ = StateSnapshot{low_state};
+      pending_state_snapshot_ = StateSnapshot{low_state, std::move(tau_real_average)};
       should_notify = true;
     }
     if (should_notify) {
@@ -1434,7 +1467,7 @@ class G1UdpBridge {
           timer_skipped_read_count_.fetch_add(1, std::memory_order_relaxed);
           continue;
         }
-        send_state_snapshot(StateSnapshot{low_state});
+        send_state_snapshot(StateSnapshot{low_state, consume_joint_torque_average()});
       }
     } catch (const std::exception & exc) {
       state_send_error_count_.fetch_add(1, std::memory_order_relaxed);
@@ -1449,6 +1482,13 @@ class G1UdpBridge {
     const LowState & low_state = snapshot.low_state;
     std::vector<float> q_real(cfg_.real_joint_names.size(), 0.0f);
     std::vector<float> dq_real(cfg_.real_joint_names.size(), 0.0f);
+    std::vector<float> tau_real = snapshot.tau_real_average;
+    if (tau_real.size() != cfg_.real_joint_names.size()) {
+      tau_real.assign(cfg_.real_joint_names.size(), 0.0f);
+      for (size_t i = 0; i < cfg_.real_joint_names.size(); ++i) {
+        tau_real[i] = low_state.motor_state().at(i).tau_est();
+      }
+    }
     for (size_t i = 0; i < cfg_.real_joint_names.size(); ++i) {
       q_real[i] = low_state.motor_state().at(i).q();
       dq_real[i] = low_state.motor_state().at(i).dq();
@@ -1456,9 +1496,11 @@ class G1UdpBridge {
 
     std::vector<float> q_policy(cfg_.policy_joint_names.size(), 0.0f);
     std::vector<float> dq_policy(cfg_.policy_joint_names.size(), 0.0f);
+    std::vector<float> tau_policy(cfg_.policy_joint_names.size(), 0.0f);
     for (size_t i = 0; i < cfg_.policy_joint_names.size(); ++i) {
       q_policy[i] = q_real[real_to_policy_[i]];
       dq_policy[i] = dq_real[real_to_policy_[i]];
+      tau_policy[i] = tau_real[real_to_policy_[i]];
     }
 
     const auto & imu = low_state.imu_state();
@@ -1469,7 +1511,7 @@ class G1UdpBridge {
     const RemoteState remote = apply_stdin_button_overrides(parse_remote(low_state.wireless_remote()));
 
     try {
-      state_sender_.send_state(q_policy, dq_policy, quat, gyro, linacc, remote);
+      state_sender_.send_state(q_policy, dq_policy, tau_policy, quat, gyro, linacc, remote);
       state_forward_count_.fetch_add(1, std::memory_order_relaxed);
     } catch (const std::exception & exc) {
       state_send_error_count_.fetch_add(1, std::memory_order_relaxed);
@@ -1694,6 +1736,9 @@ class G1UdpBridge {
   std::mutex lowstate_tick_mutex_;
   std::optional<uint32_t> last_lowstate_tick_;
   std::optional<uint32_t> next_state_tick_;
+  std::mutex torque_accumulator_mutex_;
+  std::vector<double> torque_sum_real_;
+  size_t torque_sample_count_ = 0;
   std::mutex state_snapshot_mutex_;
   std::condition_variable state_snapshot_cv_;
   std::optional<StateSnapshot> pending_state_snapshot_;
