@@ -1,5 +1,7 @@
 # Motion Tracking Sim2Real
 
+[中文使用说明](README_zh.md)
+
 Release tree for motion-tracking sim2sim and sim2real runtime code.
 
 This branch supports:
@@ -82,10 +84,38 @@ sim2real/config/g1/ckpts/G1_WBTeleop/     # WBTeleop actor
 sim2real/config/g1/ckpts/G1_SPV5_1/      # SPV5-1 actor
 ```
 
-`policy.json` supplies the canonical joint order, action scale, default pose,
-stiffness, and damping used during training. The runtime validates the ONNX
-input width against the selected actor profile (886 for WBTeleop, 8199 for
-SPV5-1).
+`policy.json` normally supplies the canonical joint order, action scale,
+default pose, stiffness, and damping used during training. The SPV5-1 profile
+also includes fallback values for older SP_Tracking exports that only contain
+network I/O/body metadata; fields present in `policy.json` always take
+precedence. The runtime validates the ONNX input width against the selected
+actor profile (886 for WBTeleop, 8199 for SPV5-1).
+
+### Motion NPZ formats
+
+The motion loader accepts both formats in the same `motions` list:
+
+- legacy: `dof_pos`, `root_pos`, `root_rot` (xyzw), and embedded `joint_names`
+- IsaacLab/Sonic: `joint_pos`, `body_pos_w`, and `body_quat_w` (wxyz)
+
+For an IsaacLab-order G1 dataset, set `motion_type: "isaaclab"` globally or on
+one motion. Body index `0` is used as the pelvis/root by default and can be
+changed with `root_body_index`.
+
+```yaml
+motion_type: "isaaclab"
+root_body_index: 0
+motions:
+  - name: "flip_360_001__A304"
+    path: "/path/to/flip_360_001__A304.npz"
+    start: 0
+    end: -1
+```
+
+IsaacLab arrays are remapped by the built-in G1 joint-name contract to the
+actor's MuJoCo joint order. `end: -1` includes the final frame. Use
+`motion_type: "mujoco"` for the same field schema when `joint_pos` is already
+stored in MuJoCo order.
 
 ## Common Setup
 

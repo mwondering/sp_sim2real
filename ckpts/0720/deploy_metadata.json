@@ -1,0 +1,30 @@
+{
+  "anchor_body_name": "pelvis",
+  "body_names": [
+    "pelvis",
+    "left_hip_yaw_link",
+    "left_knee_link",
+    "left_ankle_roll_link",
+    "right_hip_yaw_link",
+    "right_knee_link",
+    "right_ankle_roll_link",
+    "torso_link",
+    "left_shoulder_yaw_link",
+    "left_wrist_roll_link",
+    "left_wrist_yaw_link",
+    "right_shoulder_yaw_link",
+    "right_wrist_roll_link",
+    "right_wrist_yaw_link",
+    "left_hip_roll_link",
+    "right_hip_roll_link",
+    "left_shoulder_roll_link",
+    "left_elbow_link",
+    "right_shoulder_roll_link",
+    "right_elbow_link",
+    "left_wrist_pitch_link",
+    "right_wrist_pitch_link"
+  ],
+  "checkpoint": "checkpoint_48000.pt",
+  "iteration": 48000,
+  "run_name": "2026-07-19_15-32-10_SPTracking-G1-BFM-SPV5-1Actor-HEFTCritic-HEFTReward_8gpu_8192env_motion_data_full"
+}

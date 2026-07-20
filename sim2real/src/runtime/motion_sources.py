@@ -2,7 +2,7 @@ import json
 import time
 from abc import ABC
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional, Sequence
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R, Slerp
@@ -20,6 +20,186 @@ if TYPE_CHECKING:
     from runtime.policy import TrackingPolicyRaw
 
 
+# IsaacLab stores G1 joints in this articulation order.  SP_Tracking's Sonic
+# datasets use the same order but historically did not embed joint_names in
+# each NPZ, so the order must be part of the deployment contract.
+ISAACLAB_G1_JOINT_NAMES = (
+    "left_hip_pitch_joint",
+    "right_hip_pitch_joint",
+    "waist_yaw_joint",
+    "left_hip_roll_joint",
+    "right_hip_roll_joint",
+    "waist_roll_joint",
+    "left_hip_yaw_joint",
+    "right_hip_yaw_joint",
+    "waist_pitch_joint",
+    "left_knee_joint",
+    "right_knee_joint",
+    "left_shoulder_pitch_joint",
+    "right_shoulder_pitch_joint",
+    "left_ankle_pitch_joint",
+    "right_ankle_pitch_joint",
+    "left_shoulder_roll_joint",
+    "right_shoulder_roll_joint",
+    "left_ankle_roll_joint",
+    "right_ankle_roll_joint",
+    "left_shoulder_yaw_joint",
+    "right_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "right_elbow_joint",
+    "left_wrist_roll_joint",
+    "right_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "right_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_wrist_yaw_joint",
+)
+
+
+def _decode_joint_names(values) -> list[str]:
+    names = []
+    for name in np.asarray(values).reshape(-1).tolist():
+        if isinstance(name, (bytes, np.bytes_)):
+            names.append(name.decode("utf-8"))
+        else:
+            names.append(str(name))
+    return names
+
+
+def _normalize_quaternions_wxyz(values: np.ndarray, *, motion_name: str) -> np.ndarray:
+    quaternions = np.asarray(values, dtype=np.float32)
+    if quaternions.ndim != 2 or quaternions.shape[1] != 4:
+        raise ValueError(
+            f"Motion '{motion_name}' root quaternion must have shape [T, 4], "
+            f"got {quaternions.shape}."
+        )
+    norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+    if np.any(norms < 1.0e-6):
+        raise ValueError(f"Motion '{motion_name}' contains a zero-length root quaternion.")
+    return (quaternions / norms).astype(np.float32)
+
+
+def _validate_motion_arrays(
+    *,
+    motion_name: str,
+    joint_pos: np.ndarray,
+    root_pos: np.ndarray,
+    root_quat: np.ndarray,
+) -> None:
+    if joint_pos.ndim != 2:
+        raise ValueError(f"Motion '{motion_name}' joint_pos must be [T, J], got {joint_pos.shape}.")
+    if root_pos.ndim != 2 or root_pos.shape[1] != 3:
+        raise ValueError(f"Motion '{motion_name}' root_pos must be [T, 3], got {root_pos.shape}.")
+    frame_count = joint_pos.shape[0]
+    if frame_count == 0:
+        raise ValueError(f"Motion '{motion_name}' has no frames after applying start/end.")
+    if root_pos.shape[0] != frame_count or root_quat.shape[0] != frame_count:
+        raise ValueError(
+            f"Motion '{motion_name}' frame mismatch: joint={joint_pos.shape}, "
+            f"root_pos={root_pos.shape}, root_quat={root_quat.shape}."
+        )
+    for field_name, values in (
+        ("joint_pos", joint_pos),
+        ("root_pos", root_pos),
+        ("root_quat", root_quat),
+    ):
+        if not np.isfinite(values).all():
+            raise ValueError(f"Motion '{motion_name}' contains non-finite {field_name} values.")
+
+
+def _motion_frame_slice(start: int, end: int) -> slice:
+    # Repository configs have always documented end=-1 as "through the end".
+    # Convert it to Python's open-ended slice rather than silently dropping the
+    # final frame.
+    return slice(int(start), None if int(end) == -1 else int(end))
+
+
+def _load_npz_motion(
+    data: np.lib.npyio.NpzFile,
+    *,
+    motion_name: str,
+    frame_slice: slice,
+    motion_type: str,
+    dataset_joint_names: Sequence[str],
+    root_body_index: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], str]:
+    fields = set(data.files)
+    legacy_fields = {"dof_pos", "root_pos", "root_rot"}
+    isaaclab_fields = {"joint_pos", "body_pos_w", "body_quat_w"}
+
+    if legacy_fields.issubset(fields):
+        joint_pos = np.asarray(data["dof_pos"][frame_slice], dtype=np.float32)
+        root_pos = np.asarray(data["root_pos"][frame_slice], dtype=np.float32)
+        root_rot_xyzw = np.asarray(data["root_rot"][frame_slice], dtype=np.float32)
+        if root_rot_xyzw.ndim != 2 or root_rot_xyzw.shape[1] != 4:
+            raise ValueError(
+                f"Motion '{motion_name}' root_rot must have shape [T, 4], "
+                f"got {root_rot_xyzw.shape}."
+            )
+        root_quat = np.concatenate(
+            [root_rot_xyzw[:, 3:4], root_rot_xyzw[:, :3]], axis=-1
+        )
+        if "joint_names" not in fields:
+            raise ValueError(
+                f"Motion '{motion_name}' uses the legacy NPZ schema but has no joint_names."
+            )
+        source_joint_names = _decode_joint_names(data["joint_names"])
+        schema = "legacy"
+    elif isaaclab_fields.issubset(fields):
+        joint_pos = np.asarray(data["joint_pos"][frame_slice], dtype=np.float32)
+        body_pos_w = np.asarray(data["body_pos_w"][frame_slice], dtype=np.float32)
+        body_quat_w = np.asarray(data["body_quat_w"][frame_slice], dtype=np.float32)
+        if body_pos_w.ndim != 3 or body_pos_w.shape[2] != 3:
+            raise ValueError(
+                f"Motion '{motion_name}' body_pos_w must have shape [T, B, 3], "
+                f"got {body_pos_w.shape}."
+            )
+        if body_quat_w.ndim != 3 or body_quat_w.shape[2] != 4:
+            raise ValueError(
+                f"Motion '{motion_name}' body_quat_w must have shape [T, B, 4], "
+                f"got {body_quat_w.shape}."
+            )
+        if body_pos_w.shape[:2] != body_quat_w.shape[:2]:
+            raise ValueError(
+                f"Motion '{motion_name}' body pose/quaternion dimensions do not match: "
+                f"body_pos_w={body_pos_w.shape}, body_quat_w={body_quat_w.shape}."
+            )
+        if root_body_index < 0 or root_body_index >= body_pos_w.shape[1]:
+            raise ValueError(
+                f"Motion '{motion_name}' root_body_index={root_body_index} is outside "
+                f"the body dimension {body_pos_w.shape[1]}."
+            )
+        root_pos = body_pos_w[:, root_body_index]
+        # IsaacLab/SP_Tracking body_quat_w is already scalar-first (wxyz).
+        root_quat = body_quat_w[:, root_body_index]
+        if "joint_names" in fields:
+            source_joint_names = _decode_joint_names(data["joint_names"])
+            joint_order = "embedded"
+        elif motion_type == "mujoco":
+            source_joint_names = [str(name) for name in dataset_joint_names]
+            joint_order = "mujoco"
+        else:
+            # auto intentionally selects IsaacLab for this schema: these field
+            # names are the standard IsaacLab/SP_Tracking export contract.
+            source_joint_names = list(ISAACLAB_G1_JOINT_NAMES)
+            joint_order = "isaaclab"
+        schema = f"isaaclab/{joint_order}"
+    else:
+        raise ValueError(
+            f"Motion '{motion_name}' has unsupported NPZ fields. Expected either "
+            f"{sorted(legacy_fields)} or {sorted(isaaclab_fields)}, got {sorted(fields)}."
+        )
+
+    root_quat = _normalize_quaternions_wxyz(root_quat, motion_name=motion_name)
+    _validate_motion_arrays(
+        motion_name=motion_name,
+        joint_pos=joint_pos,
+        root_pos=root_pos,
+        root_quat=root_quat,
+    )
+    return joint_pos, root_pos, root_quat, source_joint_names, schema
+
+
 def remap_joint_array_by_names(
     data: np.ndarray,
     source_joint_names,
@@ -34,7 +214,14 @@ def remap_joint_array_by_names(
             f"but source_joint_names has {len(source_joint_names)} names."
         )
 
+    source_joint_names = [str(name) for name in source_joint_names]
+    target_joint_names = [str(name) for name in target_joint_names]
+    if len(set(source_joint_names)) != len(source_joint_names):
+        raise ValueError("source_joint_names contains duplicates")
     name_to_idx = {name: i for i, name in enumerate(source_joint_names)}
+    missing = [name for name in target_joint_names if name not in name_to_idx]
+    if missing:
+        raise ValueError(f"Motion is missing target joints: {missing}")
     remap = np.zeros((data.shape[0], len(target_joint_names)), dtype=np.float32)
     for i, name in enumerate(target_joint_names):
         j = name_to_idx.get(name, None)
@@ -58,30 +245,36 @@ class MotionSourceBase(ABC):
             mp = Path(mc.path)
             cfg_dir = Path(getattr(self.config, "_config_dir"))
             path = str(mp if mp.is_absolute() else (cfg_dir / mp))
-            t0, t1 = int(mc.start), int(mc.end)
-
-            data = np.load(path, allow_pickle=True)
-            if not isinstance(data, np.lib.npyio.NpzFile):
-                raise ValueError(f"[{self.__class__.__name__}] Only .npz is supported: {path}")
-
-            joint_pos = data["dof_pos"][t0:t1].astype(np.float32)
-            root_pos = data["root_pos"][t0:t1].astype(np.float32)
-            root_rot_xyzw = data["root_rot"][t0:t1].astype(np.float32)
-            root_quat = np.concatenate([root_rot_xyzw[:, 3:4], root_rot_xyzw[:, :3]], axis=-1)
-
-            joint_names = data.get("joint_names", None)
-            if joint_names is None:
+            t0 = int(getattr(mc, "start", 0))
+            t1 = int(getattr(mc, "end", -1))
+            motion_type = str(
+                getattr(mc, "motion_type", getattr(self.config, "motion_type", "auto"))
+            ).strip().lower()
+            if motion_type not in ("auto", "isaaclab", "mujoco"):
                 raise ValueError(
-                    f"[{self.__class__.__name__}] Motion '{motion_name}' is missing 'joint_names' in npz. "
-                    "Please export joint_names with the dataset."
+                    f"Motion '{motion_name}' motion_type must be auto, isaaclab, or mujoco; "
+                    f"got {motion_type!r}."
                 )
-            source_joint_names = []
-            for n in joint_names.tolist():
-                if isinstance(n, (bytes, np.bytes_)):
-                    source_joint_names.append(n.decode("utf-8"))
-                else:
-                    source_joint_names.append(str(n))
+            root_body_index = int(
+                getattr(mc, "root_body_index", getattr(self.config, "root_body_index", 0))
+            )
+
+            with np.load(path, allow_pickle=True) as data:
+                if not isinstance(data, np.lib.npyio.NpzFile):
+                    raise ValueError(f"[{self.__class__.__name__}] Only .npz is supported: {path}")
+                joint_pos, root_pos, root_quat, source_joint_names, schema = _load_npz_motion(
+                    data,
+                    motion_name=motion_name,
+                    frame_slice=_motion_frame_slice(t0, t1),
+                    motion_type=motion_type,
+                    dataset_joint_names=self.policy.dataset_joint_names,
+                    root_body_index=root_body_index,
+                )
             joint_pos = remap_joint_array_by_names(joint_pos, source_joint_names, self.policy.obs_joint_names)
+            print(
+                f"[{self.__class__.__name__}] Loaded motion '{motion_name}' "
+                f"schema={schema}, frames={joint_pos.shape[0]}"
+            )
 
             motions[motion_name] = {
                 "joint_pos": joint_pos,

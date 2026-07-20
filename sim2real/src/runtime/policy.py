@@ -27,6 +27,25 @@ def _load_policy_sidecar(policy_cfg: DictToClass) -> dict:
     with metadata_path.open("r") as file:
         return json.load(file)
 
+
+def _load_policy_metadata(policy_cfg: DictToClass) -> dict:
+    """Load exporter metadata and fill missing legacy fields from YAML.
+
+    Older SP_Tracking exporters wrote network I/O and body metadata but omitted
+    joint/action/PD deployment fields.  A profile can provide those stable
+    fields under policy_metadata_fallback; newer complete sidecars remain
+    authoritative because fallback values never overwrite existing keys.
+    """
+    metadata = dict(_load_policy_sidecar(policy_cfg))
+    fallback = getattr(policy_cfg, "policy_metadata_fallback", None)
+    if fallback is not None:
+        if not isinstance(fallback, dict):
+            raise TypeError("policy_metadata_fallback must be a mapping")
+        for key, value in fallback.items():
+            metadata.setdefault(str(key), value)
+    return metadata
+
+
 def benchmark_onnx(module, sample_input, runs=100, warmup=10, desc=""):
     for _ in range(warmup):
         _ = module(sample_input)
@@ -115,13 +134,14 @@ class Policy:
         self.policy_path = str(_resolve_policy_path(policy_cfg))
         self.module = ONNXModule(self.policy_path)
         self.use_policy_metadata = bool(getattr(policy_cfg, "use_policy_metadata", False))
-        metadata = self.module.meta
+        metadata = _load_policy_metadata(policy_cfg)
+        self.metadata = metadata
 
         if self.use_policy_metadata:
             if "joint_names" not in metadata or "action_scale" not in metadata:
                 raise ValueError(
                     f"[Policy:{self.name}] use_policy_metadata=true requires "
-                    "joint_names and action_scale in policy.json"
+                    "joint_names and action_scale in policy.json or policy_metadata_fallback"
                 )
             self.action_joint_names = list(metadata["joint_names"])
             self.action_scale = np.asarray(metadata["action_scale"], dtype=np.float32)
@@ -205,7 +225,8 @@ class Policy:
     def _map_metadata_vector(self, metadata: dict, key: str) -> np.ndarray:
         if key not in metadata:
             raise ValueError(
-                f"[Policy:{self.name}] use_policy_metadata=true requires {key} in policy.json"
+                f"[Policy:{self.name}] use_policy_metadata=true requires {key} in "
+                "policy.json or policy_metadata_fallback"
             )
         values = np.asarray(metadata[key], dtype=np.float32)
         if values.shape != (len(self.action_joint_names),):
@@ -348,9 +369,12 @@ class TrackingPolicyRaw(Policy):
                 "[TrackingPolicyRaw] dataset_joint_names must be provided in tracking.yaml."
             )
         if bool(getattr(policy_cfg, "use_policy_metadata", False)):
-            sidecar = _load_policy_sidecar(policy_cfg)
+            sidecar = _load_policy_metadata(policy_cfg)
             if "joint_names" not in sidecar:
-                raise ValueError("use_policy_metadata=true requires joint_names in policy.json")
+                raise ValueError(
+                    "use_policy_metadata=true requires joint_names in policy.json "
+                    "or policy_metadata_fallback"
+                )
             self.obs_joint_names = list(sidecar["joint_names"])
         else:
             self.obs_joint_names = list(

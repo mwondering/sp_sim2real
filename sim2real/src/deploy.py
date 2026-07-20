@@ -104,7 +104,7 @@ class Controller:
             self.init_qpos[:] = tracking_policy.controller_default_qpos
             self.kps[:] = tracking_policy.controller_kps
             self.kds[:] = tracking_policy.controller_kds
-            print("[Deploy] controller pose/gains loaded from policy.json")
+            print("[Deploy] controller pose/gains loaded from policy metadata")
         if tracking_policy.actor_profile == "spv5_1" and not self.have_tau_state:
             raise RuntimeError(
                 "SPV5-1 requires joint torque feedback, but the bridge state has no 'tau' field. "
