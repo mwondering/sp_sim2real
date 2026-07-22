@@ -9,6 +9,7 @@
 - G1 sim2real
 - G1 SP_Tracking WBTeleop actor
 - G1 SP_Tracking SPV5-1 actor
+- G1 SP_Tracking SPV5-2 actor
 - Legacy NPZ 与 IsaacLab/Sonic NPZ motion
 - UDP motion 播放与 XR/PICO 实时遥操作
 
@@ -122,6 +123,7 @@ uv run src/motion_select.py --robot g1 --tracking-config tracking_spv5_1.yaml
 | `tracking_compliance.yaml` | G1 compliance policy | 由模型 metadata 决定 |
 | `tracking_wbteleop.yaml` | SP_Tracking WBTeleop actor | 886 |
 | `tracking_spv5_1.yaml` | SP_Tracking SPV5-1 actor | 8199 |
+| `tracking_spv5_2.yaml` | SP_Tracking SPV5-2 actor | 8199 |
 
 SP_Tracking 导出文件应来自同一个 checkpoint。典型目录包含：
 
@@ -136,6 +138,7 @@ policy.onnx.data    # 仅外部权重格式的 ONNX 需要
 ```text
 sim2real/config/g1/ckpts/G1_WBTeleop/
 sim2real/config/g1/ckpts/G1_SPV5_1/
+sim2real/config/g1/ckpts/G1_SPV5_2/
 ```
 
 也可以直接在 YAML 中把 `policy_path` 设置为绝对路径。运行时会检查 actor profile 与 ONNX 输入宽度是否匹配。
@@ -156,7 +159,7 @@ sim2real/config/g1/ckpts/G1_SPV5_1/
 2. 只用 YAML fallback 补齐缺失字段。
 3. `policy.json` 已存在的同名字段始终优先。
 
-SPV5-1 observation 包含关节力矩历史，因此 sim2sim 或 G1 底层桥接状态必须提供 `tau`。仓库当前版本已经支持；旧版桥接程序会被明确拒绝，不会静默使用全零力矩。
+SPV5-1 和 SPV5-2 observation 都包含关节力矩历史，但训练语义不同：SPV5-1 使用控制周期平均值 `tau`，SPV5-2 使用最新样本 `tau_latest`。当前 sim2sim 和 G1 bridge 会同时发送两者，运行时按 actor profile 自动选择；旧版 bridge 会被明确拒绝。
 
 ## Motion NPZ 格式
 
@@ -310,6 +313,9 @@ uv run src/deploy.py --robot g1 --tracking-config tracking_wbteleop.yaml
 
 # SP_Tracking SPV5-1
 uv run src/deploy.py --robot g1 --tracking-config tracking_spv5_1.yaml
+
+# SP_Tracking SPV5-2
+uv run src/deploy.py --robot g1 --tracking-config tracking_spv5_2.yaml
 ```
 
 UDP 模式还需在第三个终端启动 `motion_select.py`；VR 模式应在按模拟器 `a` 之前启动 `serve_xrobot_teleop.py`。
@@ -400,13 +406,13 @@ taskset -c 4-7 uv run src/deploy.py --robot g1 --no-record \
 
 首先检查 `motion_type`。Sonic/IsaacLab 原始数据应使用 `isaaclab`；只有 `joint_pos` 本身已经是 `dataset_joint_names` 顺序时才使用 `mujoco`。不要仅根据数组宽度判断顺序，两个格式都可能是 29 维。
 
-### 报错缺少 `tau`
+### 报错缺少 `tau` 或 `tau_latest`
 
-SPV5-1 需要真实的关节力矩反馈历史。请重新编译并启动当前仓库中的 sim2sim/G1 bridge，不要使用旧版桥接程序。
+SPV5-1 需要控制周期平均的 `tau`，SPV5-2 需要最新采样的 `tau_latest`。请重新编译并启动当前仓库中的 sim2sim/G1 bridge，不要使用旧版桥接程序。
 
 ### 报错 observation 维度不匹配
 
-检查 checkpoint 与 actor profile 是否配套：WBTeleop 的输入宽度为 886，SPV5-1 为 8199。同时确认 `policy.onnx` 与 `policy.json` 来自同一个导出目录。
+检查 checkpoint 与 actor profile 是否配套：WBTeleop 的输入宽度为 886，SPV5-1/SPV5-2 为 8199。两个 SPV5 profile 宽度相同，运行时还会核对 ONNX 输入名。同时确认 `policy.onnx` 与 `policy.json` 来自同一个导出目录。
 
 ### motion 选择器看不到新增动作
 

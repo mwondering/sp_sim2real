@@ -35,6 +35,7 @@ class Controller:
         self.qj = np.zeros(self.dof_size, dtype=np.float32)
         self.dqj = np.zeros(self.dof_size, dtype=np.float32)
         self.tau = np.zeros(self.dof_size, dtype=np.float32)
+        self.tau_latest = np.zeros(self.dof_size, dtype=np.float32)
         self.quat = np.zeros(4, dtype=np.float32)
         self.gyro = np.zeros(3, dtype=np.float32)
         self.linacc = np.zeros(3, dtype=np.float32)
@@ -74,6 +75,7 @@ class Controller:
         }
         self.have_state = False
         self.have_tau_state = False
+        self.have_tau_latest_state = False
         self.last_state_seq: Optional[int] = None
         self.last_state_receive_time_ns: Optional[int] = None
         self.skipped_state_count = 0
@@ -107,8 +109,13 @@ class Controller:
             print("[Deploy] controller pose/gains loaded from policy metadata")
         if tracking_policy.actor_profile == "spv5_1" and not self.have_tau_state:
             raise RuntimeError(
-                "SPV5-1 requires joint torque feedback, but the bridge state has no 'tau' field. "
+                "SPV5-1 requires averaged joint torque feedback, but the bridge state has no 'tau' field. "
                 "Rebuild/restart sim2sim or g1_sim2real from this repository."
+            )
+        if tracking_policy.actor_profile == "spv5_2" and not self.have_tau_latest_state:
+            raise RuntimeError(
+                "SPV5-2 requires latest-sample joint torque feedback, but the bridge state has no "
+                "'tau_latest' field. Rebuild/restart sim2sim or g1_sim2real from this repository."
             )
         self.current_policy: Optional[Policy] = None
         self.pending_policy: Optional[Policy] = None
@@ -131,6 +138,17 @@ class Controller:
             self.have_tau_state = True
         else:
             self.tau[:] = 0.0
+        if "tau_latest" in msg:
+            tau_latest = np.asarray(msg["tau_latest"], dtype=np.float32)
+            if tau_latest.shape != self.tau_latest.shape:
+                raise ValueError(
+                    f"Bridge tau_latest shape {tau_latest.shape} does not match "
+                    f"controller shape {self.tau_latest.shape}"
+                )
+            self.tau_latest[:] = tau_latest
+            self.have_tau_latest_state = True
+        else:
+            self.tau_latest[:] = 0.0
         self.quat[:] = np.asarray(msg["quat_wxyz"], dtype=np.float32)
         self.gyro[:] = np.asarray(msg["gyro"], dtype=np.float32)
         self.linacc[:] = np.asarray(msg.get("linacc", np.zeros(3, dtype=np.float32)), dtype=np.float32)

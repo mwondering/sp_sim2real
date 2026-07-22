@@ -11,6 +11,7 @@ This branch supports:
 - G1 sim2real
 - G1 SP_Tracking WBTeleop actor deployment
 - G1 SP_Tracking SPV5-1 actor deployment
+- G1 SP_Tracking SPV5-2 actor deployment
 
 It does not include training code or dataset generation code.
 The L7 hardware sim2real bridge is not part of this branch.
@@ -82,14 +83,16 @@ Use one of these destinations:
 ```text
 sim2real/config/g1/ckpts/G1_WBTeleop/     # WBTeleop actor
 sim2real/config/g1/ckpts/G1_SPV5_1/      # SPV5-1 actor
+sim2real/config/g1/ckpts/G1_SPV5_2/      # SPV5-2 actor
 ```
 
 `policy.json` normally supplies the canonical joint order, action scale,
-default pose, stiffness, and damping used during training. The SPV5-1 profile
-also includes fallback values for older SP_Tracking exports that only contain
+default pose, stiffness, and damping used during training. The SPV5 profiles
+also include fallback values for older SP_Tracking exports that only contain
 network I/O/body metadata; fields present in `policy.json` always take
 precedence. The runtime validates the ONNX input width against the selected
-actor profile (886 for WBTeleop, 8199 for SPV5-1).
+actor profile (886 for WBTeleop, 8199 for SPV5-1/SPV5-2) and checks the
+profile-specific ONNX input key.
 
 ### Motion NPZ formats
 
@@ -265,12 +268,17 @@ uv run src/deploy.py --robot g1 --tracking-config tracking_wbteleop.yaml
 
 # SPV5-1 actor
 uv run src/deploy.py --robot g1 --tracking-config tracking_spv5_1.yaml
+
+# SPV5-2 actor
+uv run src/deploy.py --robot g1 --tracking-config tracking_spv5_2.yaml
 ```
 
-Use the same `--tracking-config` value with `motion_select.py`. Both actor
-profiles support UDP motion playback and VR input. SPV5-1 additionally requires
-the `tau` feedback field added to this repository's sim2sim and G1 bridge; an
-older bridge is rejected instead of silently feeding zero torque history.
+Use the same `--tracking-config` value with `motion_select.py`. All actor
+profiles support UDP motion playback and VR input. SPV5-1 consumes the
+control-window average `tau`, while SPV5-2 consumes the newest `tau_latest`
+sample, matching their respective training observation contracts. Rebuild the
+sim2sim/G1 bridge after updating; an older bridge is rejected instead of
+silently feeding the wrong torque history.
 
 After both terminals are running:
 

@@ -212,8 +212,13 @@ class Policy:
         if not self.module.in_keys:
             raise ValueError(f"[Policy:{self.name}] policy.json has no in_keys")
         self.input_key = self.module.in_keys[0]
+        session_inputs = self.module.ort_session.get_inputs()
+        if not session_inputs:
+            raise ValueError(f"[Policy:{self.name}] ONNX model has no inputs")
+        self.onnx_input_name = session_inputs[0].name
+        self._validate_policy_input_key()
         self.policy_input = self._empty_policy_input()
-        input_shape = self.module.ort_session.get_inputs()[0].shape
+        input_shape = session_inputs[0].shape
         expected_obs_dim = input_shape[-1] if len(input_shape) > 0 else None
         if isinstance(expected_obs_dim, int) and expected_obs_dim != self.num_obs:
             raise ValueError(
@@ -266,6 +271,9 @@ class Policy:
         print(f"[Policy:{self.name}] deactivated")
 
     # -------- abstract hooks ----------
+    def _validate_policy_input_key(self):
+        return
+
     def _build_obs_modules(self):
         raise NotImplementedError
 
@@ -344,9 +352,9 @@ class TrackingPolicyRaw(Policy):
         self.actor_profile = (
             str(getattr(policy_cfg, "actor_profile", "legacy")).strip().lower().replace("-", "_")
         )
-        if self.actor_profile not in ("legacy", "wbteleop", "spv5_1"):
+        if self.actor_profile not in ("legacy", "wbteleop", "spv5_1", "spv5_2"):
             raise ValueError(
-                f"[TrackingPolicyRaw] actor_profile must be legacy, wbteleop, or spv5_1; "
+                f"[TrackingPolicyRaw] actor_profile must be legacy, wbteleop, spv5_1, or spv5_2; "
                 f"got {self.actor_profile!r}"
             )
         self.body_name = "torso_link"
@@ -403,6 +411,21 @@ class TrackingPolicyRaw(Policy):
         super().__init__(name, policy_cfg, controller)
         self.init_count = 0
 
+    def _validate_policy_input_key(self):
+        expected = {
+            "spv5_1": "spv5_1_observation",
+            "spv5_2": "spv5_2_observation",
+        }.get(self.actor_profile)
+        if expected is not None and (
+            self.input_key != expected or self.onnx_input_name != expected
+        ):
+            raise ValueError(
+                f"[TrackingPolicyRaw] actor_profile={self.actor_profile!r} requires "
+                f"input {expected!r}; policy.json has {self.input_key!r} and ONNX has "
+                f"{self.onnx_input_name!r}. "
+                "Use a policy.json exported from the matching SP_Tracking actor."
+            )
+
     def fade_in(self):
         super().fade_in()
         self.source.on_fade_in()
@@ -429,6 +452,12 @@ class TrackingPolicyRaw(Policy):
             from runtime.observation import SPV51ActorObservation
 
             self.obs_modules = [SPV51ActorObservation(self)]
+            self.num_obs = sum(module.size for module in self.obs_modules)
+            return
+        if self.actor_profile == "spv5_2":
+            from runtime.observation import SPV52ActorObservation
+
+            self.obs_modules = [SPV52ActorObservation(self)]
             self.num_obs = sum(module.size for module in self.obs_modules)
             return
 
@@ -470,7 +499,12 @@ class TrackingPolicyRaw(Policy):
         return self.mapper_observation.map_state_to_from(self.controller.dqj).astype(np.float32)
 
     def current_joint_torque_obs(self) -> np.ndarray:
-        return self.mapper_observation.map_state_to_from(self.controller.tau).astype(np.float32)
+        torque = (
+            self.controller.tau_latest
+            if self.actor_profile == "spv5_2"
+            else self.controller.tau
+        )
+        return self.mapper_observation.map_state_to_from(torque).astype(np.float32)
 
     def request_motion(self, name: str) -> bool:
         request_fn = getattr(self.source, "request_motion", None)

@@ -16,7 +16,12 @@ if str(SRC_ROOT) not in sys.path:
 
 from common.udp_transport import _state_payload
 from runtime.kinematics import quat_to_rot6d_wxyz
-from runtime.observation import SPV51ActorObservation, WBTeleopActorObservation
+from runtime.observation import (
+    SPV51ActorObservation,
+    SPV52ActorObservation,
+    WBTeleopActorObservation,
+)
+from runtime.policy import TrackingPolicyRaw
 
 
 class _FakePolicy:
@@ -82,8 +87,16 @@ class ActorProfileContractTests(unittest.TestCase):
         qpos_history = value[qpos_start : qpos_start + 50 * 29].reshape(50, 29)
         np.testing.assert_allclose(qpos_history[0], qpos_history[-1])
 
+    def test_spv5_2_observation_contract(self):
+        observation = SPV52ActorObservation(_FakePolicy("tracking_spv5_2.yaml"))
+        observation.update()
+        value = observation.compute()
+        self.assertEqual(value.shape, (8199,))
+        self.assertTrue(np.isfinite(value).all())
+
     def test_udp_state_payload_carries_torque(self):
         tau = np.arange(29, dtype=np.float32)
+        tau_latest = tau + 0.5
         payload = _state_payload(
             q=np.zeros(29),
             dq=np.zeros(29),
@@ -91,10 +104,47 @@ class ActorProfileContractTests(unittest.TestCase):
             gyro=np.zeros(3),
             linacc=np.zeros(3),
             tau=tau,
+            tau_latest=tau_latest,
             buttons={},
             sticks={},
         )
         np.testing.assert_array_equal(payload["tau"], tau)
+        np.testing.assert_array_equal(payload["tau_latest"], tau_latest)
+
+    def test_spv5_profiles_select_their_training_torque_semantics(self):
+        policy = object.__new__(TrackingPolicyRaw)
+        policy.mapper_observation = SimpleNamespace(
+            map_state_to_from=lambda value: np.asarray(value)
+        )
+        policy.controller = SimpleNamespace(
+            tau=np.ones(29, dtype=np.float32),
+            tau_latest=np.full(29, 2.0, dtype=np.float32),
+        )
+
+        policy.actor_profile = "spv5_1"
+        np.testing.assert_array_equal(
+            policy.current_joint_torque_obs(), np.ones(29, dtype=np.float32)
+        )
+        policy.actor_profile = "spv5_2"
+        np.testing.assert_array_equal(
+            policy.current_joint_torque_obs(), np.full(29, 2.0, dtype=np.float32)
+        )
+
+    def test_spv5_2_profile_rejects_same_width_spv5_1_sidecar(self):
+        policy = object.__new__(TrackingPolicyRaw)
+        policy.name = "tracking"
+        policy.actor_profile = "spv5_2"
+        policy.input_key = "spv5_1_observation"
+        policy.onnx_input_name = "spv5_1_observation"
+        with self.assertRaisesRegex(ValueError, "spv5_2_observation"):
+            policy._validate_policy_input_key()
+
+        policy.input_key = "spv5_2_observation"
+        with self.assertRaisesRegex(ValueError, "ONNX has"):
+            policy._validate_policy_input_key()
+
+        policy.onnx_input_name = "spv5_2_observation"
+        policy._validate_policy_input_key()
 
 
 if __name__ == "__main__":

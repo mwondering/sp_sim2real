@@ -528,14 +528,18 @@ class UdpLatestSender {
 
   void send_state(
       const std::vector<float> & q, const std::vector<float> & dq, const std::vector<float> & tau,
+      const std::vector<float> & tau_latest,
       const std::vector<float> & quat,
       const std::vector<float> & gyro, const std::vector<float> & linacc, const RemoteState & remote)
   {
     std::vector<uint8_t> payload;
-    payload.reserve((q.size() + dq.size() + tau.size() + quat.size() + gyro.size() + linacc.size()) * sizeof(float));
+    payload.reserve(
+        (q.size() + dq.size() + tau.size() + tau_latest.size() + quat.size() + gyro.size() + linacc.size()) *
+        sizeof(float));
     const PackedArray q_ref = append_float_array(payload, q);
     const PackedArray dq_ref = append_float_array(payload, dq);
     const PackedArray tau_ref = append_float_array(payload, tau);
+    const PackedArray tau_latest_ref = append_float_array(payload, tau_latest);
     const PackedArray quat_ref = append_float_array(payload, quat);
     const PackedArray gyro_ref = append_float_array(payload, gyro);
     const PackedArray linacc_ref = append_float_array(payload, linacc);
@@ -543,6 +547,7 @@ class UdpLatestSender {
     std::ostringstream meta;
     meta << "{\"q\":" << ndarray_meta(q_ref) << ",\"dq\":" << ndarray_meta(dq_ref)
          << ",\"tau\":" << ndarray_meta(tau_ref)
+         << ",\"tau_latest\":" << ndarray_meta(tau_latest_ref)
          << ",\"quat_wxyz\":" << ndarray_meta(quat_ref) << ",\"gyro\":" << ndarray_meta(gyro_ref)
          << ",\"linacc\":" << ndarray_meta(linacc_ref) << ",\"buttons\":{"
          << "\"start\":" << bool_text(remote.start) << ",\"stop\":" << bool_text(remote.stop)
@@ -1482,6 +1487,7 @@ class G1UdpBridge {
     const LowState & low_state = snapshot.low_state;
     std::vector<float> q_real(cfg_.real_joint_names.size(), 0.0f);
     std::vector<float> dq_real(cfg_.real_joint_names.size(), 0.0f);
+    std::vector<float> tau_latest_real(cfg_.real_joint_names.size(), 0.0f);
     std::vector<float> tau_real = snapshot.tau_real_average;
     if (tau_real.size() != cfg_.real_joint_names.size()) {
       tau_real.assign(cfg_.real_joint_names.size(), 0.0f);
@@ -1492,15 +1498,18 @@ class G1UdpBridge {
     for (size_t i = 0; i < cfg_.real_joint_names.size(); ++i) {
       q_real[i] = low_state.motor_state().at(i).q();
       dq_real[i] = low_state.motor_state().at(i).dq();
+      tau_latest_real[i] = low_state.motor_state().at(i).tau_est();
     }
 
     std::vector<float> q_policy(cfg_.policy_joint_names.size(), 0.0f);
     std::vector<float> dq_policy(cfg_.policy_joint_names.size(), 0.0f);
     std::vector<float> tau_policy(cfg_.policy_joint_names.size(), 0.0f);
+    std::vector<float> tau_latest_policy(cfg_.policy_joint_names.size(), 0.0f);
     for (size_t i = 0; i < cfg_.policy_joint_names.size(); ++i) {
       q_policy[i] = q_real[real_to_policy_[i]];
       dq_policy[i] = dq_real[real_to_policy_[i]];
       tau_policy[i] = tau_real[real_to_policy_[i]];
+      tau_latest_policy[i] = tau_latest_real[real_to_policy_[i]];
     }
 
     const auto & imu = low_state.imu_state();
@@ -1511,7 +1520,8 @@ class G1UdpBridge {
     const RemoteState remote = apply_stdin_button_overrides(parse_remote(low_state.wireless_remote()));
 
     try {
-      state_sender_.send_state(q_policy, dq_policy, tau_policy, quat, gyro, linacc, remote);
+      state_sender_.send_state(
+          q_policy, dq_policy, tau_policy, tau_latest_policy, quat, gyro, linacc, remote);
       state_forward_count_.fetch_add(1, std::memory_order_relaxed);
     } catch (const std::exception & exc) {
       state_send_error_count_.fetch_add(1, std::memory_order_relaxed);

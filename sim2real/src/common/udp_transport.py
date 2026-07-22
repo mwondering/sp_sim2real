@@ -81,6 +81,7 @@ def _state_payload(
     gyro: np.ndarray,
     linacc: np.ndarray,
     tau: np.ndarray | None,
+    tau_latest: np.ndarray | None = None,
     buttons: dict[str, bool],
     sticks: dict[str, float],
     state_receive_time_ns: int | None = None,
@@ -97,6 +98,8 @@ def _state_payload(
     }
     if tau is not None:
         payload["tau"] = np.asarray(tau, dtype=np.float32)
+    if tau_latest is not None:
+        payload["tau_latest"] = np.asarray(tau_latest, dtype=np.float32)
     return payload
 
 
@@ -183,6 +186,7 @@ class UDPRobotLow:
         gyro: np.ndarray,
         linacc: np.ndarray,
         tau: np.ndarray | None = None,
+        tau_latest: np.ndarray | None = None,
         buttons: dict[str, bool],
         sticks: dict[str, float],
         state_receive_time_ns: int | None = None,
@@ -195,6 +199,7 @@ class UDPRobotLow:
                 gyro=gyro,
                 linacc=linacc,
                 tau=tau,
+                tau_latest=tau_latest,
                 buttons=buttons,
                 sticks=sticks,
                 state_receive_time_ns=state_receive_time_ns,

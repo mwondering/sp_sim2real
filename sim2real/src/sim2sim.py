@@ -275,6 +275,9 @@ class Sim2Sim:
             else:
                 tau_mujoco = self.data.qfrc_actuator[6:].copy()
             tau = self._mujoco_to_policy(tau_mujoco).astype(np.float32)
+            tau_latest = self._mujoco_to_policy(
+                self.data.qfrc_actuator[6:]
+            ).astype(np.float32)
             self._tau_sum_mujoco[:] = 0.0
             self._tau_sample_count = 0
             quat = self.data.qpos[3:7].copy().astype(np.float32)
@@ -287,6 +290,7 @@ class Sim2Sim:
             gyro=gyro,
             linacc=linacc,
             tau=tau,
+            tau_latest=tau_latest,
             buttons=self._buttons_snapshot(),
             sticks={name: 0.0 for name in STICK_KEYS},
         )

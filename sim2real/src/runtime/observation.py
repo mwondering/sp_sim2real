@@ -515,6 +515,7 @@ class WBTeleopActorObservation(BaseObs):
 class SPV51ActorObservation(BaseObs):
     """Exact 8199-D flattened deployment input for the SPV5-1 ONNX actor."""
 
+    PROFILE_NAME = "SPV5-1"
     REFERENCE_STEPS = tuple(range(-42, 8))
     HISTORY_LENGTH = 50
     KEY_BODY_DIM = 13 * (3 + 6 + 3 + 3)
@@ -529,7 +530,7 @@ class SPV51ActorObservation(BaseObs):
         )
         joint_count = len(policy.obs_joint_names)
         if joint_count != 29:
-            raise ValueError(f"SPV5-1 expects 29 observation joints, got {joint_count}")
+            raise ValueError(f"{self.PROFILE_NAME} expects 29 observation joints, got {joint_count}")
 
         self.joint_pos_history = _ChronologicalHistory(self.HISTORY_LENGTH, joint_count)
         self.joint_vel_history = _ChronologicalHistory(self.HISTORY_LENGTH, joint_count)
@@ -587,7 +588,7 @@ class SPV51ActorObservation(BaseObs):
         )
         if robot_key_body.size != self.KEY_BODY_DIM:
             raise RuntimeError(
-                f"SPV5-1 robot key-body state has {robot_key_body.size} values, "
+                f"{self.PROFILE_NAME} robot key-body state has {robot_key_body.size} values, "
                 f"expected {self.KEY_BODY_DIM}"
             )
 
@@ -608,7 +609,15 @@ class SPV51ActorObservation(BaseObs):
             )
         ).astype(np.float32)
         if self._value.size != self.SIZE:
-            raise RuntimeError(f"SPV5-1 observation has {self._value.size} values, expected {self.SIZE}")
+            raise RuntimeError(
+                f"{self.PROFILE_NAME} observation has {self._value.size} values, expected {self.SIZE}"
+            )
 
     def compute(self) -> np.ndarray:
         return self._value
+
+
+class SPV52ActorObservation(SPV51ActorObservation):
+    """SPV5-2 uses the same 8199-D layout with latest-sample torque feedback."""
+
+    PROFILE_NAME = "SPV5-2"
