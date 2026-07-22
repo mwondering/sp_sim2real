@@ -89,6 +89,8 @@ cd <repo>/sim2real
 uv run src/sim2sim.py --robot g1
 ```
 
+G1 的 `bridge.yaml` 默认启用 `startup.default_pose_mode: sim2real_pd`。按 `s` 后，sim2sim 先跟随 deploy 的两秒插值到策略元数据中的默认关节角；目标稳定后，机器人落地并用 deploy 下发的 Kp、Kd 做动力学 PD 保持。等待终端打印 `grounded PD hold is active` 后再按 `a`，此时临时的基座稳定力会被撤掉，策略接管时保留已有的 q、dq、torque 和接触状态。基座稳定仅用于避免无策略等待阶段直接摔倒，不作用于策略阶段。若需要复现旧版零速度、零扭矩的悬空瞬移交接，可临时改为 `teleport`。
+
 终端 2，启动 SPV5-1 策略控制器：
 
 ```bash

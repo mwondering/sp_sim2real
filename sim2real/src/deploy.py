@@ -21,6 +21,7 @@ def get_config(policy_cfg_path: str) -> DictToClass:
         policy_cfg_path = SIM2REAL_ROOT / policy_cfg_path
     with open(str(policy_cfg_path), 'r') as f:
         policy_cfg = DictToClass(yaml.load(f, Loader=yaml.FullLoader))
+    policy_cfg._config_path = str(policy_cfg_path)
     policy_cfg._config_dir = str(policy_cfg_path.parent)
     return policy_cfg
 
@@ -376,13 +377,18 @@ class Controller:
                 break
 
             self.current_policy.update_obs()
+            policy_observation = self.current_policy.policy_observation_copy()
             action = self.current_policy.compute_action()
             self._apply_action(action)
             self.send_cmd()
 
-            self.current_policy.post_step()
             if self.recorder is not None:
-                self.recorder.record_step(self, action)
+                self.recorder.record_step(
+                    self,
+                    action,
+                    policy_observation=policy_observation,
+                )
+            self.current_policy.post_step()
             self.policy_step += 1
 
     def close(self):

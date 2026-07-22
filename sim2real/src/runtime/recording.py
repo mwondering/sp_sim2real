@@ -45,6 +45,10 @@ class PolicyRunRecorder:
             self.output_root = root if root.is_absolute() else SIM2REAL_ROOT / root
 
         self.ckpt_name = _sanitize_filename_part(_ckpt_name_from_policy_path(policy.policy_path))
+        self.policy_observation_key = str(policy.input_key)
+        self.policy_observation_dim = int(policy.num_obs)
+        policy_config = getattr(policy, "config", None)
+        self.policy_config_path = str(getattr(policy_config, "_config_path", ""))
         self.output_dir = self.output_root / self.robot
         self.output_path = self._next_output_path()
 
@@ -70,16 +74,39 @@ class PolicyRunRecorder:
     def frame_count(self) -> int:
         return len(self._frames)
 
-    def record_step(self, controller, action_delta: np.ndarray) -> None:
+    def record_step(
+        self,
+        controller,
+        action_delta: np.ndarray,
+        *,
+        policy_observation: np.ndarray,
+    ) -> None:
         policy = self.policy
+        observation = np.asarray(policy_observation, dtype=np.float32)
+        expected_shape = (self.policy_observation_dim,)
+        if observation.shape != expected_shape:
+            raise ValueError(
+                f"Policy observation has shape {observation.shape}, expected {expected_shape}"
+            )
+
+        state_seq = getattr(controller, "last_state_seq", None)
+        state_receive_time_ns = getattr(controller, "last_state_receive_time_ns", None)
         self._frames.append(
             {
                 "wall_time_ns": np.int64(time.time_ns()),
                 "monotonic_time_s": np.float64(time.monotonic()),
                 "policy_step": np.int64(controller.policy_step),
+                "state_seq": np.int64(-1 if state_seq is None else state_seq),
+                "state_receive_time_ns": np.int64(
+                    -1 if state_receive_time_ns is None else state_receive_time_ns
+                ),
+                "policy_observation": observation.copy(),
                 "joint_pos": controller.qj.astype(np.float32, copy=True),
                 "joint_vel": controller.dqj.astype(np.float32, copy=True),
                 "joint_torque": controller.tau.astype(np.float32, copy=True),
+                "joint_torque_latest": controller.tau_latest.astype(
+                    np.float32, copy=True
+                ),
                 "action_delta": np.asarray(action_delta, dtype=np.float32).copy(),
                 "cmd_q": controller.cmd_q.astype(np.float32, copy=True),
                 "cmd_qd": controller.cmd_qd.astype(np.float32, copy=True),
@@ -117,6 +144,12 @@ class PolicyRunRecorder:
                 "ckpt_name": np.asarray(self.ckpt_name),
                 "policy_name": np.asarray(str(getattr(self.policy, "name", ""))),
                 "policy_path": np.asarray(str(getattr(self.policy, "policy_path", ""))),
+                "policy_config_path": np.asarray(self.policy_config_path),
+                "actor_profile": np.asarray(
+                    str(getattr(self.policy, "actor_profile", "legacy"))
+                ),
+                "policy_observation_key": np.asarray(self.policy_observation_key),
+                "policy_observation_dim": np.int64(self.policy_observation_dim),
                 "joint_names": np.asarray(self.joint_names),
                 "action_joint_names": np.asarray(list(getattr(self.policy, "action_joint_names", []))),
                 "control_dt": np.float32(self.control_dt),

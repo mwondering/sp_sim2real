@@ -55,6 +55,51 @@ def _as_vector(data, *, name: str, size: int | None = None, dtype=np.float64) ->
     return arr
 
 
+def _normalize_default_pose_mode(value: str) -> str:
+    normalized = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "teleport": "teleport",
+        "kinematic": "teleport",
+        "sim2real_pd": "sim2real_pd",
+        "dynamic": "sim2real_pd",
+        "pd": "sim2real_pd",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "startup.default_pose_mode must be 'teleport' or 'sim2real_pd', "
+            f"got {value!r}"
+        )
+    return aliases[normalized]
+
+
+def _compute_pd_control(qpos, qvel, target, kp, kd, lower, upper) -> np.ndarray:
+    control = np.asarray(kp) * (np.asarray(target) - np.asarray(qpos))
+    control += np.asarray(kd) * (0.0 - np.asarray(qvel))
+    return np.clip(control, np.asarray(lower), np.asarray(upper))
+
+
+def _compute_base_stabilization(
+    qpos,
+    qvel,
+    target_qpos,
+    *,
+    xy_kp: float,
+    xy_kd: float,
+    rotation_kp: float,
+    rotation_kd: float,
+) -> np.ndarray:
+    """Return a temporary 6-DoF base wrench for the pre-policy PD hold."""
+    qpos = np.asarray(qpos, dtype=np.float64)
+    qvel = np.asarray(qvel, dtype=np.float64)
+    target_qpos = np.asarray(target_qpos, dtype=np.float64)
+    wrench = np.zeros(6, dtype=np.float64)
+    wrench[:2] = xy_kp * (target_qpos[:2] - qpos[:2]) - xy_kd * qvel[:2]
+    rotation_error = np.zeros(3, dtype=np.float64)
+    mujoco.mju_subQuat(rotation_error, target_qpos[3:7], qpos[3:7])
+    wrench[3:6] = rotation_kp * rotation_error - rotation_kd * qvel[3:6]
+    return wrench
+
+
 class Sim2Sim:
     def __init__(self, args, config):
         self.args = args
@@ -128,8 +173,64 @@ class Sim2Sim:
             name="root_qpos_control",
             size=7,
         )
+        startup_cfg = _cfg_value(config, "startup", "startup", {})
+        self.default_pose_mode = _normalize_default_pose_mode(
+            _cfg_value(
+                startup_cfg,
+                "default_pose_mode",
+                "startup.default_pose_mode",
+                "teleport",
+            )
+        )
+        default_target_stable_s = float(
+            _cfg_value(
+                startup_cfg,
+                "target_stable_s",
+                "startup.target_stable_s",
+                0.1,
+            )
+        )
+        if default_target_stable_s < 0.0:
+            raise ValueError("startup.target_stable_s must be non-negative")
+        self.default_target_stable_steps = max(
+            1,
+            int(round(default_target_stable_s * self.low_level_freq)),
+        )
+        self.default_target_tolerance = float(
+            _cfg_value(
+                startup_cfg,
+                "target_tolerance",
+                "startup.target_tolerance",
+                1e-6,
+            )
+        )
+        self.base_xy_kp = float(
+            _cfg_value(startup_cfg, "base_xy_kp", "startup.base_xy_kp", 2000.0)
+        )
+        self.base_xy_kd = float(
+            _cfg_value(startup_cfg, "base_xy_kd", "startup.base_xy_kd", 100.0)
+        )
+        self.base_rotation_kp = float(
+            _cfg_value(
+                startup_cfg,
+                "base_rotation_kp",
+                "startup.base_rotation_kp",
+                1000.0,
+            )
+        )
+        self.base_rotation_kd = float(
+            _cfg_value(
+                startup_cfg,
+                "base_rotation_kd",
+                "startup.base_rotation_kd",
+                50.0,
+            )
+        )
+        if self.default_target_tolerance < 0.0:
+            raise ValueError("startup.target_tolerance must be non-negative")
         self.viewer_fps = int(_cfg_value(config, "viewer_fps", "viewer_fps", 10))
         self.max_external_force = float(_cfg_value(config, "max_external_force", "max_external_force", 30.0))
+        print(f"{self.log_prefix} startup.default_pose_mode={self.default_pose_mode}")
 
         self.data.qpos[:7] = self.root_qpos_home
         self.data.qpos[7:] = self._policy_to_mujoco(self.home_q_policy)
@@ -141,6 +242,9 @@ class Sim2Sim:
         self._kd_policy = np.zeros(self.n_policy_joints, dtype=np.float64)
         self._have_command = False
         self._have_tracking_target = False
+        self._loaded_default_pose = False
+        self._default_target_stable_count = 0
+        self._last_default_target_policy = self.home_q_policy.copy()
         self._buttons = {k: False for k in BUTTON_KEYS}
 
         self._cmd_lock = threading.Lock()
@@ -177,6 +281,92 @@ class Sim2Sim:
 
     def _mujoco_to_policy(self, values: np.ndarray) -> np.ndarray:
         return self.policy_to_mujoco.map_state_to_from(values)
+
+    def _step_current_pd_command(self, *, stabilize_base: bool = False) -> None:
+        with self._cmd_lock:
+            ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
+            kp_mujoco = self._policy_to_mujoco(self._kp_policy)
+            kd_mujoco = self._policy_to_mujoco(self._kd_policy)
+        with self._sim_lock:
+            self.data.qfrc_applied[:6] = 0.0
+            if stabilize_base:
+                self.data.qfrc_applied[:6] = _compute_base_stabilization(
+                    self.data.qpos[:7],
+                    self.data.qvel[:6],
+                    self.root_qpos_control,
+                    xy_kp=self.base_xy_kp,
+                    xy_kd=self.base_xy_kd,
+                    rotation_kp=self.base_rotation_kp,
+                    rotation_kd=self.base_rotation_kd,
+                )
+            self.data.ctrl[:] = _compute_pd_control(
+                self.data.qpos[7:],
+                self.data.qvel[6:],
+                ptargets_mujoco,
+                kp_mujoco,
+                kd_mujoco,
+                self.ctrl_lower,
+                self.ctrl_upper,
+            )
+            self._limit_external_forces()
+            mujoco.mj_step(self.model, self.data)
+            self._tau_sum_mujoco += self.data.qfrc_actuator[6:]
+            self._tau_sample_count += 1
+
+    def _step_default_pose_startup(self, *, force_load: bool = False) -> None:
+        """Follow deploy's interpolation, then switch to a loaded PD hold."""
+        if self._loaded_default_pose:
+            self._step_current_pd_command(stabilize_base=True)
+            return
+
+        with self._cmd_lock:
+            ptargets_policy = self._ptargets_policy.copy()
+            kp_policy = self._kp_policy.copy()
+        gains_active = bool(np.any(kp_policy > 0.0))
+        target_delta = float(
+            np.max(np.abs(ptargets_policy - self._last_default_target_policy))
+        )
+        if gains_active and target_delta <= self.default_target_tolerance:
+            self._default_target_stable_count += 1
+        else:
+            self._default_target_stable_count = 0
+        self._last_default_target_policy[:] = ptargets_policy
+
+        ptargets_mujoco = self._policy_to_mujoco(ptargets_policy)
+        with self._sim_lock:
+            # Keep the legacy suspended interpolation.  Starting free dynamics
+            # from bridge.yaml's all-zero home_q is not a valid standing state.
+            self.data.qpos[:7] = self.root_qpos_home
+            self.data.qvel[:6] = 0.0
+            self.data.qpos[7:] = ptargets_mujoco
+            self.data.qvel[6:] = 0.0
+            self.data.ctrl[:] = 0.0
+            self.data.qfrc_applied[:6] = 0.0
+            mujoco.mj_forward(self.model, self.data)
+
+        if (
+            not force_load
+            and self._default_target_stable_count < self.default_target_stable_steps
+        ):
+            return
+
+        with self._sim_lock:
+            # The exact target is now the policy metadata default pose.  Put it
+            # at ground height and enable joint dynamics before policy handoff.
+            self.data.qpos[:7] = self.root_qpos_control
+            self.data.qpos[7:] = ptargets_mujoco
+            self.data.qvel[:] = 0.0
+            self.data.ctrl[:] = 0.0
+            self.data.qfrc_applied[:6] = 0.0
+            mujoco.mj_forward(self.model, self.data)
+            self._tau_sum_mujoco[:] = 0.0
+            self._tau_sample_count = 0
+        self._loaded_default_pose = True
+        self._have_tracking_target = True
+        print(
+            f"{self.log_prefix} Default target is stable; grounded PD hold is active. "
+            "Press 'a' to release the temporary base stabilizer and enter policy"
+        )
 
     def _set_button(self, name: str, value: bool) -> None:
         with self._button_lock:
@@ -316,18 +506,31 @@ class Sim2Sim:
             state_timer.sleep()
 
     def simulate_gantry(self):
-        print('Moving to default pose...\nPress "a" after the robot is in default pose to begin control loop')
+        use_sim2real_pd = self.default_pose_mode == "sim2real_pd"
+        if use_sim2real_pd:
+            print(
+                "Moving to default pose...\n"
+                "Wait for the grounded-PD-ready message, then press 'a' to begin control loop"
+            )
+        else:
+            print(
+                "Moving to default pose...\n"
+                "Press 'a' after the robot is in default pose to begin control loop"
+            )
         timer = Timer(self.low_level_dt)
         while True:
-            with self._cmd_lock:
-                ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
-            with self._sim_lock:
-                self.data.qpos[:7] = self.root_qpos_home
-                self.data.qvel[:6] = 0.0
-                self.data.qpos[7:] = ptargets_mujoco
-                self.data.qvel[6:] = 0.0
-                self.data.ctrl[:] = 0.0
-                mujoco.mj_forward(self.model, self.data)
+            if use_sim2real_pd:
+                self._step_default_pose_startup()
+            else:
+                with self._cmd_lock:
+                    ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
+                with self._sim_lock:
+                    self.data.qpos[:7] = self.root_qpos_home
+                    self.data.qvel[:6] = 0.0
+                    self.data.qpos[7:] = ptargets_mujoco
+                    self.data.qvel[6:] = 0.0
+                    self.data.ctrl[:] = 0.0
+                    mujoco.mj_forward(self.model, self.data)
 
             if not self._viewer_sync():
                 break
@@ -342,9 +545,15 @@ class Sim2Sim:
 
     def simulate_control(self):
         print("Running control loop...")
-        with self._sim_lock:
-            self.data.qpos[:7] = self.root_qpos_control
-            mujoco.mj_forward(self.model, self.data)
+        use_sim2real_pd = self.default_pose_mode == "sim2real_pd"
+        if use_sim2real_pd and not self._loaded_default_pose:
+            # An early 'a' should not reintroduce the old zero-dq/zero-torque
+            # handoff.  Start the loaded hold from the latest deploy target.
+            self._step_default_pose_startup(force_load=True)
+        elif not use_sim2real_pd:
+            with self._sim_lock:
+                self.data.qpos[:7] = self.root_qpos_control
+                mujoco.mj_forward(self.model, self.data)
 
         timer = Timer(self.low_level_dt)
         time_start = time.time()
@@ -353,6 +562,8 @@ class Sim2Sim:
 
         while self.is_alive:
             if not self.policy_queried:
+                if use_sim2real_pd:
+                    self._step_current_pd_command(stabilize_base=True)
                 self._publish_state_if_due()
                 timer.sleep()
                 time_start = time.time()
@@ -360,33 +571,45 @@ class Sim2Sim:
                 loop_count = 0
                 continue
 
-            with self._cmd_lock:
-                ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
-                kp_mujoco = self._policy_to_mujoco(self._kp_policy)
-                kd_mujoco = self._policy_to_mujoco(self._kd_policy)
+            if use_sim2real_pd:
+                # cmd_enable is set only after deploy observes A.  Releasing the
+                # startup stabilizer here preserves the loaded joint/contact
+                # state and applies the first policy target in the same step.
+                self._step_current_pd_command(stabilize_base=False)
+            else:
+                with self._cmd_lock:
+                    ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
+                    kp_mujoco = self._policy_to_mujoco(self._kp_policy)
+                    kd_mujoco = self._policy_to_mujoco(self._kd_policy)
 
-            with self._sim_lock:
-                qpos = self.data.qpos[7:]
-                qvel = self.data.qvel[6:]
-                if not self._have_tracking_target:
-                    delta = ptargets_mujoco - qpos
-                    if float(np.linalg.norm(delta)) > 1e-4:
-                        self._have_tracking_target = True
-                if not self._have_tracking_target:
-                    self.data.qpos[:7] = self.root_qpos_control
-                    self.data.qvel[:6] = 0.0
-                    self.data.qpos[7:] = ptargets_mujoco
-                    self.data.qvel[6:] = 0.0
-                    self.data.ctrl[:] = 0.0
-                    mujoco.mj_forward(self.model, self.data)
-                else:
-                    ctrl = kp_mujoco * (ptargets_mujoco - qpos) + kd_mujoco * (0 - qvel)
-                    ctrl = np.clip(ctrl, self.ctrl_lower, self.ctrl_upper)
-                    self.data.ctrl[:] = ctrl
-                    self._limit_external_forces()
-                    mujoco.mj_step(self.model, self.data)
-                self._tau_sum_mujoco += self.data.qfrc_actuator[6:]
-                self._tau_sample_count += 1
+                with self._sim_lock:
+                    qpos = self.data.qpos[7:]
+                    qvel = self.data.qvel[6:]
+                    if not self._have_tracking_target:
+                        delta = ptargets_mujoco - qpos
+                        if float(np.linalg.norm(delta)) > 1e-4:
+                            self._have_tracking_target = True
+                    if not self._have_tracking_target:
+                        self.data.qpos[:7] = self.root_qpos_control
+                        self.data.qvel[:6] = 0.0
+                        self.data.qpos[7:] = ptargets_mujoco
+                        self.data.qvel[6:] = 0.0
+                        self.data.ctrl[:] = 0.0
+                        mujoco.mj_forward(self.model, self.data)
+                    else:
+                        self.data.ctrl[:] = _compute_pd_control(
+                            qpos,
+                            qvel,
+                            ptargets_mujoco,
+                            kp_mujoco,
+                            kd_mujoco,
+                            self.ctrl_lower,
+                            self.ctrl_upper,
+                        )
+                        self._limit_external_forces()
+                        mujoco.mj_step(self.model, self.data)
+                    self._tau_sum_mujoco += self.data.qfrc_actuator[6:]
+                    self._tau_sample_count += 1
 
             if not self._viewer_sync():
                 break

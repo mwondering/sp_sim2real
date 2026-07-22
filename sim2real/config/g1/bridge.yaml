@@ -8,6 +8,18 @@ udp:
 freq:
   physical_hz: 500
   state_decimation: 10
+# Follow deploy.py's policy-metadata default target, then run a grounded PD hold
+# before policy handoff. A temporary planar/orientation base stabilizer prevents
+# the policy-off robot from simply falling; it is removed on the first policy
+# command. Use "teleport" to reproduce the old zero-dq/zero-torque handoff.
+startup:
+  default_pose_mode: "sim2real_pd"
+  target_stable_s: 0.2
+  target_tolerance: 1.0e-6
+  base_xy_kp: 2000.0
+  base_xy_kd: 100.0
+  base_rotation_kp: 1000.0
+  base_rotation_kd: 50.0
 viewer_fps: 10
 
 policy_joint_names: [

@@ -292,6 +292,27 @@ class Policy:
             self.policy_input = self._empty_policy_input()
         self.policy_input[self.input_key][0, :] = np.concatenate(obs_list, axis=0)
 
+    def policy_observation_copy(self) -> np.ndarray:
+        """Return the exact single-batch observation prepared for ONNX inference."""
+        if self.policy_input is None:
+            raise RuntimeError(
+                f"[Policy:{self.name}] observation requested before update_obs()"
+            )
+        if self.input_key not in self.policy_input:
+            raise KeyError(
+                f"[Policy:{self.name}] policy input has no observation key "
+                f"{self.input_key!r}"
+            )
+
+        observation = np.asarray(self.policy_input[self.input_key])
+        expected_shape = (1, self.num_obs)
+        if observation.shape != expected_shape:
+            raise ValueError(
+                f"[Policy:{self.name}] observation shape is {observation.shape}, "
+                f"expected {expected_shape}"
+            )
+        return observation[0].astype(np.float32, copy=True)
+
     def compute_action(self) -> np.ndarray:
         try:
             out = self.module(self.policy_input)

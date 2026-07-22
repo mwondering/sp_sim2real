@@ -247,6 +247,15 @@ cd <repo>/sim2real
 uv run src/sim2sim.py --robot g1
 ```
 
+G1 defaults to `startup.default_pose_mode: sim2real_pd` in `bridge.yaml`.
+After `s`, the simulator follows deploy's two-second interpolation to the policy
+metadata pose. Once the target is stable, it enters a grounded dynamic PD hold
+using deploy's Kp and Kd. Wait for `grounded PD hold is active` before pressing
+`a`; the temporary planar/orientation base stabilizer is then removed and the
+loaded q, dq, torque, and contact state are preserved for policy handoff. The
+stabilizer is never active during policy execution. Set the mode to `teleport`
+only to reproduce the previous zero-velocity, zero-torque kinematic handoff.
+
 Terminal 2 starts the policy controller:
 
 ```bash
