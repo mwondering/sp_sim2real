@@ -129,12 +129,20 @@ class TeleopRobotConfig:
         return bind_addr_to_connect_addr(self.ctrl_bind_addr)
 
 
-def load_teleop_robot_config(robot: str) -> TeleopRobotConfig:
+def load_teleop_robot_config(
+    robot: str, config_path: str | Path | None = None
+) -> TeleopRobotConfig:
     robot_key = str(robot).strip().lower()
     if robot_key not in SUPPORTED_ROBOTS:
         raise ValueError(f"Unsupported robot '{robot}'. Expected one of {SUPPORTED_ROBOTS}.")
 
-    cfg_path = retarget_teleop_config_path(robot_key)
+    if config_path is None:
+        cfg_path = retarget_teleop_config_path(robot_key)
+    else:
+        cfg_path = Path(config_path).expanduser()
+        if not cfg_path.is_absolute():
+            cfg_path = SIM2REAL_ROOT / cfg_path
+        cfg_path = cfg_path.resolve()
     if not cfg_path.exists():
         raise FileNotFoundError(f"Teleop config not found: {cfg_path}")
 
@@ -142,6 +150,12 @@ def load_teleop_robot_config(robot: str) -> TeleopRobotConfig:
         raw = yaml.safe_load(f) or {}
 
     _require_keys(raw, ("robot_key", "retarget", "server", "recorder"), str(cfg_path))
+    configured_robot = str(raw["robot_key"]).strip().lower()
+    if configured_robot != robot_key:
+        raise ValueError(
+            f"Teleop config robot_key={configured_robot!r} does not match "
+            f"--robot {robot_key!r}: {cfg_path}"
+        )
     retarget = raw["retarget"]
     server = raw["server"]
     recorder = raw["recorder"]

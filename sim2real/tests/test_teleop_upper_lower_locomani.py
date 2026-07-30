@@ -183,6 +183,47 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
             controller._pico_software_stop_requested(released, now=now)
         )
 
+    def test_remote_depth_freshness_uses_server_receive_clock(self):
+        controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.depth_timeout_s = 0.25
+        controller.max_invalid_fraction = 0.6
+        now = time.monotonic()
+        packet = SimpleNamespace(
+            recv_time=now - 0.02,
+            values=np.full((1, 36, 64), 0.5, dtype=np.float32),
+            metadata={
+                # A remote monotonic timestamp has an unrelated epoch and must
+                # not participate in the policy server's freshness decision.
+                "capture_monotonic": now - 1_000_000.0,
+                "invalid_fraction": 0.0,
+                "invalid_value": -1.0,
+            },
+        )
+        controller.depth_sub = SimpleNamespace(read_latest=lambda: packet)
+        np.testing.assert_allclose(controller._depth(), 0.5)
+
+    def test_remote_depth_rejects_stale_or_future_receive_timestamp(self):
+        controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.depth_timeout_s = 0.25
+        controller.max_invalid_fraction = 0.6
+        now = time.monotonic()
+        values = np.full((1, 36, 64), 0.5, dtype=np.float32)
+        stale = SimpleNamespace(
+            recv_time=now - 1.0,
+            values=values,
+            metadata={"capture_monotonic": now, "invalid_fraction": 0.0},
+        )
+        controller.depth_sub = SimpleNamespace(read_latest=lambda: stale)
+        self.assertIsNone(controller._depth())
+
+        future = SimpleNamespace(
+            recv_time=now + 1.0,
+            values=values,
+            metadata={"capture_monotonic": now, "invalid_fraction": 0.0},
+        )
+        controller.depth_sub = SimpleNamespace(read_latest=lambda: future)
+        self.assertIsNone(controller._depth())
+
     def test_worker_metadata_enforces_profile_serial_and_fov(self):
         source = object.__new__(D435iSource)
         source.width = 640
@@ -277,6 +318,79 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
         hardware = config["camera_process"]["hardware"]
         self.assertEqual(hardware["mount_body"], "pelvis")
         self.assertAlmostEqual(float(hardware["pitch_down_deg"]), 60.0)
+
+    def test_distributed_profiles_preserve_policy_contract_and_split_hosts(self):
+        config_dir = SIM2REAL_ROOT / "config/g1"
+        local_controller = yaml.safe_load(
+            (config_dir / "controller.yaml").read_text()
+        )
+        distributed_controller = yaml.safe_load(
+            (config_dir / "controller-distributed.yaml").read_text()
+        )
+        for key, value in local_controller.items():
+            if key != "udp":
+                self.assertEqual(distributed_controller[key], value)
+        self.assertEqual(
+            distributed_controller["udp"]["state_bind_host"], "10.42.0.1"
+        )
+        self.assertEqual(
+            distributed_controller["udp"]["cmd_host"], "10.42.0.2"
+        )
+
+        local_task = yaml.safe_load(
+            (
+                config_dir
+                / "teleop-upper-lower-locomani-real.yaml"
+            ).read_text()
+        )
+        distributed_task = yaml.safe_load(
+            (
+                config_dir
+                / "teleop-upper-lower-locomani-real-distributed.yaml"
+            ).read_text()
+        )
+        for key, value in local_task.items():
+            if key != "camera_process":
+                self.assertEqual(distributed_task[key], value)
+        for key, value in local_task["camera_process"].items():
+            if key not in ("depth_bind", "depth_connect"):
+                self.assertEqual(
+                    distributed_task["camera_process"][key], value
+                )
+        self.assertEqual(
+            distributed_task["camera_process"]["depth_connect"],
+            "tcp://10.42.0.2:28811",
+        )
+
+        retarget = yaml.safe_load(
+            (config_dir / "retarget/teleop-server.yaml").read_text()
+        )
+        for field in ("req_bind_addr", "rep_bind_addr", "ctrl_bind_addr"):
+            self.assertTrue(
+                retarget["server"][field].startswith("tcp://127.0.0.1:")
+            )
+
+        bridge_config_dir = SIM2REAL_ROOT.parent / "g1_sim2real/config"
+        local_bridge = yaml.safe_load(
+            (
+                bridge_config_dir
+                / "g1_bridge_teleop_upper_lower_locomani.yaml"
+            ).read_text()
+        )
+        bridge = yaml.safe_load(
+            (
+                bridge_config_dir
+                / "g1_bridge_teleop_upper_lower_locomani_distributed.yaml"
+            ).read_text()
+        )
+        for key, value in local_bridge.items():
+            if key != "udp":
+                self.assertEqual(bridge[key], value)
+        self.assertEqual(bridge["udp"]["state_host"], "10.42.0.1")
+        self.assertEqual(bridge["udp"]["cmd_bind_host"], "10.42.0.2")
+        self.assertEqual(bridge["udp"]["cmd_allowed_host"], "10.42.0.1")
+        self.assertTrue(bridge["safety"]["startup_damping"])
+        self.assertEqual(bridge["safety"]["damping_publish_hz"], 50.0)
 
     def test_spv5_2_task_option_resolves_inside_current_repository(self):
         config_path = SIM2REAL_ROOT / "config/g1/tracking_spv5_2.yaml"

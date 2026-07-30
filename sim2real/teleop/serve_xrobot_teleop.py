@@ -13,6 +13,7 @@ Architecture:
 import argparse
 import json
 import multiprocessing as mp
+from pathlib import Path
 import threading
 import time
 import traceback
@@ -98,7 +99,7 @@ def _retarget_worker_main(
 class LowLatencyTeleopPoseZMQServer:
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self.config = load_teleop_robot_config(args.robot)
+        self.config = load_teleop_robot_config(args.robot, args.config)
         self.robot = self.config.robot_key
         self.vis_fps = int(self.config.vis_fps)
         self.ctrl_fps = int(self.config.ctrl_fps)
@@ -581,6 +582,12 @@ def parse_args() -> argparse.Namespace:
         choices=list(SUPPORTED_ROBOTS),
         default="g1",
         help="Robot key for config/<robot>/retarget/teleop.yaml",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional teleop YAML; relative paths are resolved from sim2real/",
     )
     return parser.parse_args()
 

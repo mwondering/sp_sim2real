@@ -157,11 +157,13 @@ class TeleopUpperLowerLocomaniController(Controller):
         packet = self.depth_sub.read_latest()
         if packet is None:
             return None
-        capture_time = packet.metadata.get("capture_monotonic")
-        if capture_time is None:
-            age = time.monotonic() - packet.recv_time
-        else:
-            age = time.monotonic() - float(capture_time)
+        # ``capture_monotonic`` belongs to the camera host's monotonic clock.
+        # Monotonic clocks have no shared epoch across machines, so using it on
+        # the policy server can make every remote frame appear stale or from the
+        # future.  Freshness is therefore based only on the subscriber-local
+        # receive timestamp.  The source timestamp remains metadata for
+        # camera-side diagnostics.
+        age = time.monotonic() - packet.recv_time
         if age < -0.1 or age > self.depth_timeout_s:
             return None
         if packet.values.shape != (1, 36, 64):
@@ -454,6 +456,27 @@ def main(argv=None) -> None:
         type=Path,
         default=None,
     )
+    parser.add_argument(
+        "--controller-config",
+        type=Path,
+        default=None,
+        help="Optional controller YAML; relative paths are resolved from sim2real/",
+    )
+    parser.add_argument(
+        "--state-bind-host",
+        default=None,
+        help="Override controller udp.state_bind_host for distributed deployment",
+    )
+    parser.add_argument(
+        "--cmd-host",
+        default=None,
+        help="Override controller udp.cmd_host for distributed deployment",
+    )
+    parser.add_argument(
+        "--depth-connect",
+        default=None,
+        help="Override camera_process.depth_connect for distributed deployment",
+    )
     parser.add_argument("--target", choices=("sim", "real"), default="sim")
     parser.add_argument(
         "--terrain-class",
@@ -482,6 +505,8 @@ def main(argv=None) -> None:
         args.task_config = SRC_ROOT.parent / "config/g1" / config_name
     task_config_path = args.task_config.expanduser().resolve()
     task_config = _load_task_config(task_config_path)
+    if args.depth_connect is not None:
+        task_config["camera_process"]["depth_connect"] = str(args.depth_connect)
     configured_target = str(task_config.get("target", args.target))
     if configured_target != args.target:
         raise ValueError(
@@ -490,9 +515,19 @@ def main(argv=None) -> None:
         )
     controller = None
     try:
+        controller_config = (
+            args.controller_config
+            if args.controller_config is not None
+            else controller_config_path(args.robot)
+        )
+        ctrl_cfg = get_config(controller_config)
+        if args.state_bind_host is not None:
+            ctrl_cfg.udp.state_bind_host = str(args.state_bind_host)
+        if args.cmd_host is not None:
+            ctrl_cfg.udp.cmd_host = str(args.cmd_host)
         controller = TeleopUpperLowerLocomaniController(
             args,
-            get_config(controller_config_path(args.robot)),
+            ctrl_cfg,
             task_config,
             task_config_path,
         )

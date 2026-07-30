@@ -76,6 +76,11 @@ def main(argv=None) -> None:
     )
     parser.add_argument("--serial-number", default=None)
     parser.add_argument("--worker-python", default=None)
+    parser.add_argument(
+        "--depth-bind",
+        default=None,
+        help="Override camera_process.depth_bind, e.g. tcp://10.42.0.2:28811",
+    )
     parser.add_argument("--show-depth", action="store_true")
     parser.add_argument("--max-frames", type=int, default=0)
     args = parser.parse_args(argv)
@@ -85,6 +90,8 @@ def main(argv=None) -> None:
     if str(config.get("target", "real")) != "real":
         raise ValueError("depth_camera_real requires a task config with target: real")
     camera_cfg = config["camera_process"]
+    if args.depth_bind is not None:
+        camera_cfg["depth_bind"] = str(args.depth_bind)
     hardware = camera_cfg["hardware"]
     preprocess = camera_cfg["preprocess"]
     source = D435iSource(
