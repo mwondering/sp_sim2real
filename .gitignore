@@ -122,6 +122,8 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv_depth/
+robot_distributed.env
 env/
 venv/
 ENV/
@@ -209,3 +211,4 @@ dataset
 !g1_sim2real/third_party/unitree_sdk2/lib/**
 !g1_sim2real/third_party/unitree_sdk2/thirdparty/lib/
 !g1_sim2real/third_party/unitree_sdk2/thirdparty/lib/**
+g1_sim2real/build_locomani/

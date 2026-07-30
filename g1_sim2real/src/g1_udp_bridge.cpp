@@ -286,6 +286,7 @@ struct UdpConfig {
   int state_port = 0;
   std::string cmd_bind_host;
   int cmd_port = 0;
+  std::string cmd_allowed_host;
   int recvbuf_bytes = 1 << 20;
   int sndbuf_bytes = 1 << 20;
 };
@@ -306,12 +307,25 @@ struct LowLevelConfig {
   double release_sleep_s = 1.0;
 };
 
+struct SafetyConfig {
+  bool enabled = false;
+  double command_timeout_s = 0.0;
+  bool startup_damping = true;
+  double damping_publish_hz = 50.0;
+  double max_abs_q_des = 4.0;
+  double max_abs_qd_des = 30.0;
+  double max_kp = 120.0;
+  double max_kd = 10.0;
+  double max_command_step_rad = 0.2;
+};
+
 struct BridgeConfig {
   std::string lowcmd_topic;
   std::string lowstate_topic;
   UdpConfig udp;
   FrequencyConfig freq;
   LowLevelConfig low_level;
+  SafetyConfig safety;
   std::vector<std::string> policy_joint_names;
   std::vector<std::string> real_joint_names;
 };
@@ -333,12 +347,19 @@ BridgeConfig load_config(const std::string & path)
   cfg.udp.state_port = yaml_required<int>(udp["state_port"], "udp.state_port");
   cfg.udp.cmd_bind_host = yaml_required<std::string>(udp["cmd_bind_host"], "udp.cmd_bind_host");
   cfg.udp.cmd_port = yaml_required<int>(udp["cmd_port"], "udp.cmd_port");
+  cfg.udp.cmd_allowed_host = yaml_value_or<std::string>(udp["cmd_allowed_host"], "");
   cfg.udp.recvbuf_bytes = yaml_value_or<int>(udp["recvbuf_bytes"], 1 << 20);
   cfg.udp.sndbuf_bytes = yaml_value_or<int>(udp["sndbuf_bytes"], 1 << 20);
   validate_udp_port(cfg.udp.state_port, "udp.state_port");
   validate_udp_port(cfg.udp.cmd_port, "udp.cmd_port");
   if (cfg.udp.recvbuf_bytes < 0 || cfg.udp.sndbuf_bytes < 0) {
     throw std::runtime_error("udp recv/send buffer sizes must be non-negative");
+  }
+  if (!cfg.udp.cmd_allowed_host.empty()) {
+    in_addr allowed_addr{};
+    if (::inet_pton(AF_INET, cfg.udp.cmd_allowed_host.c_str(), &allowed_addr) != 1) {
+      throw std::runtime_error("udp.cmd_allowed_host must be an IPv4 address or empty");
+    }
   }
 
   const YAML::Node freq = raw["freq"];
@@ -378,6 +399,32 @@ BridgeConfig load_config(const std::string & path)
   }
   if (cfg.low_level.release_sleep_s < 0.0) {
     throw std::runtime_error("low_level.release_sleep_s must be non-negative");
+  }
+
+  const YAML::Node safety = raw["safety"];
+  if (safety) {
+    cfg.safety.enabled = yaml_value_or<bool>(safety["enabled"], false);
+    cfg.safety.command_timeout_s = yaml_value_or<double>(safety["command_timeout_s"], 0.0);
+    cfg.safety.startup_damping = yaml_value_or<bool>(safety["startup_damping"], true);
+    cfg.safety.damping_publish_hz = yaml_value_or<double>(safety["damping_publish_hz"], 50.0);
+    cfg.safety.max_abs_q_des = yaml_value_or<double>(safety["max_abs_q_des"], 4.0);
+    cfg.safety.max_abs_qd_des = yaml_value_or<double>(safety["max_abs_qd_des"], 30.0);
+    cfg.safety.max_kp = yaml_value_or<double>(safety["max_kp"], 120.0);
+    cfg.safety.max_kd = yaml_value_or<double>(safety["max_kd"], 10.0);
+    cfg.safety.max_command_step_rad =
+        yaml_value_or<double>(safety["max_command_step_rad"], 0.2);
+  }
+  if (cfg.safety.enabled) {
+    if (cfg.safety.command_timeout_s <= 0.0) {
+      throw std::runtime_error("safety.command_timeout_s must be positive when safety is enabled");
+    }
+    if (cfg.safety.damping_publish_hz <= 0.0 ||
+        cfg.safety.max_abs_q_des <= 0.0 || cfg.safety.max_abs_qd_des < 0.0 ||
+        cfg.safety.max_kp <= 0.0 || cfg.safety.max_kd <= 0.0 ||
+        cfg.safety.max_command_step_rad <= 0.0) {
+      throw std::runtime_error(
+          "enabled safety rates/limits must be positive (max_abs_qd_des may be zero)");
+    }
   }
 
   cfg.policy_joint_names = yaml_string_vector(raw["policy_joint_names"], "policy_joint_names");
@@ -705,7 +752,9 @@ class UdpLatestReceiver {
  public:
   using Callback = std::function<void(const LatestPacket &)>;
 
-  UdpLatestReceiver(const std::string & host, int port, int recvbuf_bytes, Callback callback)
+  UdpLatestReceiver(
+      const std::string & host, int port, const std::string & allowed_host,
+      int recvbuf_bytes, Callback callback)
       : callback_(std::move(callback))
   {
     fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -728,6 +777,12 @@ class UdpLatestReceiver {
     }
     if (::bind(fd_, reinterpret_cast<const sockaddr *>(&bind_addr), sizeof(bind_addr)) < 0) {
       throw std::runtime_error(errno_text("bind() failed"));
+    }
+    if (!allowed_host.empty()) {
+      if (::inet_pton(AF_INET, allowed_host.c_str(), &allowed_addr_) != 1) {
+        throw std::runtime_error("Invalid UDP allowed host: " + allowed_host);
+      }
+      filter_source_ = true;
     }
     const int flags = ::fcntl(fd_, F_GETFL, 0);
     if (flags < 0 || ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
@@ -775,6 +830,11 @@ class UdpLatestReceiver {
     return decode_errors_.load(std::memory_order_relaxed);
   }
 
+  uint64_t source_rejections() const
+  {
+    return source_rejections_.load(std::memory_order_relaxed);
+  }
+
  private:
   void recv_loop()
   {
@@ -804,6 +864,10 @@ class UdpLatestReceiver {
           break;
         }
         packets_received_.fetch_add(1, std::memory_order_relaxed);
+        if (filter_source_ && from.sin_addr.s_addr != allowed_addr_.s_addr) {
+          source_rejections_.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
         last_packet.assign(buffer.begin(), buffer.begin() + n);
         recv_time = now_ns();
       }
@@ -828,6 +892,9 @@ class UdpLatestReceiver {
   std::atomic<uint64_t> packets_received_{0};
   std::atomic<uint64_t> packets_decoded_{0};
   std::atomic<uint64_t> decode_errors_{0};
+  std::atomic<uint64_t> source_rejections_{0};
+  bool filter_source_ = false;
+  in_addr allowed_addr_{};
   std::thread thread_;
   Callback callback_;
 };
@@ -892,15 +959,27 @@ class G1UdpBridge {
     }
 
     wait_for_lowstate();
+    if (cfg_.safety.enabled && cfg_.safety.startup_damping) {
+      std::cout << "[G1Bridge] Startup damping active while waiting for "
+                   "the first valid command"
+                << std::endl;
+      publish_damping_command(
+          /*log=*/false, /*require_safety_output=*/true);
+    }
     start_state_sender_thread();
 
     command_receiver_.reset(new UdpLatestReceiver(
-        cfg_.udp.cmd_bind_host, cfg_.udp.cmd_port, cfg_.udp.recvbuf_bytes,
+        cfg_.udp.cmd_bind_host, cfg_.udp.cmd_port, cfg_.udp.cmd_allowed_host,
+        cfg_.udp.recvbuf_bytes,
         [this](const LatestPacket & packet) { on_udp_command(packet); }));
     command_receiver_->start();
+    start_command_watchdog();
 
     std::cout << "[G1Bridge] endpoints: state=" << cfg_.udp.state_host << ":" << cfg_.udp.state_port
-              << " cmd_bind=" << cfg_.udp.cmd_bind_host << ":" << cfg_.udp.cmd_port << std::endl;
+              << " cmd_bind=" << cfg_.udp.cmd_bind_host << ":" << cfg_.udp.cmd_port
+              << " cmd_allowed="
+              << (cfg_.udp.cmd_allowed_host.empty() ? "<any>" : cfg_.udp.cmd_allowed_host)
+              << std::endl;
     std::cout << "[G1Bridge] freq: physical_hz=" << cfg_.freq.physical_hz
               << " state_decimation=" << cfg_.freq.state_decimation
               << " state_publish_mode=" << state_publish_mode_name(cfg_.freq.state_publish_mode)
@@ -908,6 +987,14 @@ class G1UdpBridge {
               << std::endl;
     std::cout << "[G1Bridge] command mode: event-driven UDP callback -> DDS Write, mode_pr="
               << static_cast<int>(cfg_.low_level.mode_pr) << std::endl;
+    if (cfg_.safety.enabled) {
+      std::cout << "[G1Bridge] task safety: watchdog=" << cfg_.safety.command_timeout_s
+                << "s startup_damping=" << (cfg_.safety.startup_damping ? "on" : "off")
+                << " damping_hz=" << cfg_.safety.damping_publish_hz
+                << " max_q=" << cfg_.safety.max_abs_q_des
+                << " max_kp/kd=" << cfg_.safety.max_kp << "/" << cfg_.safety.max_kd
+                << " max_step=" << cfg_.safety.max_command_step_rad << "rad" << std::endl;
+    }
     if (cfg_.freq.state_publish_mode == StatePublishMode::LowStateTick) {
       std::cout << "[G1Bridge] state mode: LowState.tick target decimation -> dedicated UDP state sender thread"
                 << std::endl;
@@ -947,6 +1034,7 @@ class G1UdpBridge {
     if (command_receiver_) {
       command_receiver_->close();
     }
+    stop_command_watchdog();
     stop_stdin_button_thread();
     stop_state_sender_thread();
     lowstate_subscriber_.reset();
@@ -1532,7 +1620,8 @@ class G1UdpBridge {
   void on_udp_command(const LatestPacket & packet)
   {
     if (fatal_shutdown_requested_.load(std::memory_order_relaxed) ||
-        g_stop_requested.load(std::memory_order_relaxed)) {
+        g_stop_requested.load(std::memory_order_relaxed) ||
+        safety_latched_.load(std::memory_order_relaxed)) {
       return;
     }
     const int64_t packet_seq = static_cast<int64_t>(packet.seq);
@@ -1557,6 +1646,10 @@ class G1UdpBridge {
         return;
       }
       const int enable = packet.data["enable"] ? packet.data["enable"].as<int>() : 0;
+      if (const auto violation = validate_command(q_src, qd_src, kp_src, kd_src)) {
+        latch_safety(*violation);
+        return;
+      }
 
       LowCmd cmd;
       cmd.mode_pr() = cfg_.low_level.mode_pr;
@@ -1583,12 +1676,137 @@ class G1UdpBridge {
 
       {
         std::lock_guard<std::mutex> lock(cmd_write_mutex_);
+        if (safety_latched_.load(std::memory_order_relaxed)) {
+          return;
+        }
         lowcmd_publisher_->Write(cmd);
+        if (cfg_.safety.enabled) {
+          const bool first_valid_command =
+              !have_valid_command_.load(std::memory_order_relaxed);
+          last_valid_command_ns_.store(now_ns(), std::memory_order_relaxed);
+          have_valid_command_.store(true, std::memory_order_release);
+          last_q_des_ = q_src;
+          last_kp_ = kp_src;
+          if (first_valid_command && cfg_.safety.startup_damping) {
+            std::cout << "[G1Bridge] First valid command accepted; "
+                         "startup damping released and watchdog armed"
+                      << std::endl;
+          }
+        }
       }
       record_policy_delay(yaml_u64_optional(packet.data["state_receive_time_ns"]));
       command_forward_count_.fetch_add(1, std::memory_order_relaxed);
     } catch (const std::exception & exc) {
       std::cerr << "[G1Bridge] Ignore malformed UDP command: " << exc.what() << std::endl;
+      if (cfg_.safety.enabled) {
+        latch_safety(std::string("malformed UDP command: ") + exc.what());
+      }
+    }
+  }
+
+  std::optional<std::string> validate_command(
+      const std::vector<double> & q, const std::vector<double> & qd,
+      const std::vector<double> & kp, const std::vector<double> & kd)
+  {
+    if (!cfg_.safety.enabled) {
+      return std::nullopt;
+    }
+    const auto check_finite_limit = [](const std::vector<double> & values, double max_abs,
+                                       bool non_negative, const char * name)
+        -> std::optional<std::string> {
+      for (size_t i = 0; i < values.size(); ++i) {
+        const double value = values[i];
+        if (!std::isfinite(value)) {
+          return std::string(name) + "[" + std::to_string(i) + "] is NaN/Inf";
+        }
+        if ((non_negative && value < 0.0) || std::abs(value) > max_abs) {
+          return std::string(name) + "[" + std::to_string(i) + "] exceeds safety limit";
+        }
+      }
+      return std::nullopt;
+    };
+    if (auto error = check_finite_limit(q, cfg_.safety.max_abs_q_des, false, "q_des")) {
+      return error;
+    }
+    if (auto error = check_finite_limit(qd, cfg_.safety.max_abs_qd_des, false, "qd_des")) {
+      return error;
+    }
+    if (auto error = check_finite_limit(kp, cfg_.safety.max_kp, true, "kp")) {
+      return error;
+    }
+    if (auto error = check_finite_limit(kd, cfg_.safety.max_kd, true, "kd")) {
+      return error;
+    }
+    if (have_valid_command_.load(std::memory_order_acquire) &&
+        last_q_des_.size() == q.size() && last_kp_.size() == kp.size()) {
+      for (size_t i = 0; i < q.size(); ++i) {
+        // A q target is semantically inactive while kp is zero. Do not reject
+        // the normal zero-torque -> initial-PD handoff on that inactive value.
+        if (last_kp_[i] > 0.0 && kp[i] > 0.0 &&
+            std::abs(q[i] - last_q_des_[i]) > cfg_.safety.max_command_step_rad) {
+          return std::string("q_des[") + std::to_string(i) +
+                 "] step exceeds safety.max_command_step_rad";
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  void latch_safety(const std::string & reason)
+  {
+    if (!cfg_.safety.enabled || safety_latched_.exchange(true)) {
+      return;
+    }
+    std::cerr << "[G1Bridge] SAFETY LATCH: " << reason
+              << "; continuously publishing damping and requiring bridge restart"
+              << std::endl;
+    publish_damping_command(/*log=*/true, /*require_safety_output=*/true);
+  }
+
+  void start_command_watchdog()
+  {
+    if (!cfg_.safety.enabled) {
+      return;
+    }
+    watchdog_stop_.store(false);
+    command_watchdog_thread_ = std::thread([this]() {
+      const uint64_t timeout_ns = static_cast<uint64_t>(
+          cfg_.safety.command_timeout_s * 1.0e9);
+      const auto damping_period = std::chrono::duration_cast<SteadyClock::duration>(
+          std::chrono::duration<double>(1.0 / cfg_.safety.damping_publish_hz));
+      auto next_damping = SteadyClock::now();
+      while (!watchdog_stop_.load(std::memory_order_relaxed) &&
+             !g_stop_requested.load(std::memory_order_relaxed)) {
+        const bool have_command =
+            have_valid_command_.load(std::memory_order_acquire);
+        if (have_command && !safety_latched_.load(std::memory_order_relaxed)) {
+          const uint64_t last = last_valid_command_ns_.load(std::memory_order_relaxed);
+          const uint64_t now = now_ns();
+          if (now > last && now - last > timeout_ns) {
+            latch_safety("valid UDP command timeout");
+          }
+        }
+        const bool should_publish_damping =
+            safety_latched_.load(std::memory_order_relaxed) ||
+            (cfg_.safety.startup_damping && !have_command);
+        const auto steady_now = SteadyClock::now();
+        if (should_publish_damping && steady_now >= next_damping) {
+          publish_damping_command(
+              /*log=*/false, /*require_safety_output=*/true);
+          next_damping = steady_now + damping_period;
+        } else if (!should_publish_damping) {
+          next_damping = steady_now;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    });
+  }
+
+  void stop_command_watchdog()
+  {
+    watchdog_stop_.store(true);
+    if (command_watchdog_thread_.joinable()) {
+      command_watchdog_thread_.join();
     }
   }
 
@@ -1609,7 +1827,8 @@ class G1UdpBridge {
     policy_delay_max_ms_ = std::max(policy_delay_max_ms_, delay_ms);
   }
 
-  void publish_damping_command()
+  void publish_damping_command(
+      bool log = true, bool require_safety_output = false)
   {
     if (!lowcmd_publisher_) {
       return;
@@ -1627,8 +1846,17 @@ class G1UdpBridge {
     }
     cmd.crc() = crc32_core((uint32_t *)&cmd, (static_cast<uint32_t>(sizeof(LowCmd)) >> 2) - 1);
     std::lock_guard<std::mutex> lock(cmd_write_mutex_);
+    if (require_safety_output &&
+        !safety_latched_.load(std::memory_order_relaxed) &&
+        (!cfg_.safety.startup_damping ||
+         have_valid_command_.load(std::memory_order_acquire))) {
+      return;
+    }
     lowcmd_publisher_->Write(cmd);
-    std::cout << "[G1Bridge] Damping command sent" << std::endl;
+    damping_command_count_.fetch_add(1, std::memory_order_relaxed);
+    if (log) {
+      std::cout << "[G1Bridge] Damping command sent" << std::endl;
+    }
   }
 
   void log_rates()
@@ -1657,20 +1885,26 @@ class G1UdpBridge {
     const uint64_t timer_no_snapshot = timer_no_snapshot_count_.exchange(0, std::memory_order_relaxed);
     const uint64_t timer_skipped_reads = timer_skipped_read_count_.exchange(0, std::memory_order_relaxed);
     const uint64_t stdin_button_events = stdin_button_event_count_.exchange(0, std::memory_order_relaxed);
+    const uint64_t damping_commands = damping_command_count_.exchange(0, std::memory_order_relaxed);
 
     uint64_t udp_rx_delta = 0;
     uint64_t udp_decoded_delta = 0;
     uint64_t udp_errors_delta = 0;
+    uint64_t udp_source_rejections_delta = 0;
     if (command_receiver_) {
       const uint64_t rx = command_receiver_->packets_received();
       const uint64_t decoded = command_receiver_->packets_decoded();
       const uint64_t errors = command_receiver_->decode_errors();
+      const uint64_t source_rejections = command_receiver_->source_rejections();
       udp_rx_delta = rx - last_udp_rx_;
       udp_decoded_delta = decoded - last_udp_decoded_;
       udp_errors_delta = errors - last_udp_errors_;
+      udp_source_rejections_delta =
+          source_rejections - last_udp_source_rejections_;
       last_udp_rx_ = rx;
       last_udp_decoded_ = decoded;
       last_udp_errors_ = errors;
+      last_udp_source_rejections_ = source_rejections;
     }
 
     uint64_t delay_count = 0;
@@ -1704,11 +1938,13 @@ class G1UdpBridge {
               << ", mode=" << state_publish_mode_name(cfg_.freq.state_publish_mode) << ") | command="
               << (static_cast<double>(command_count) / elapsed) << " Hz (" << command_count << ") | cmd_udp_rx="
               << udp_rx_delta << " decoded=" << udp_decoded_delta << " errors=" << udp_errors_delta
+              << " source_rejected=" << udp_source_rejections_delta
               << " | lowstate_crc_errors=" << crc_errors << " duplicate_ticks=" << duplicate_ticks
               << " tick_gap_events=" << tick_gap_events << " tick_missing=" << tick_missing
               << " tick_resets=" << tick_resets << " state_snapshot_overwrites=" << snapshot_overwrites
               << " state_snapshot_drops=" << snapshot_drops << " state_send_errors=" << state_send_errors
-              << " stdin_button_events=" << stdin_button_events;
+              << " stdin_button_events=" << stdin_button_events
+              << " damping_commands=" << damping_commands;
     if (cfg_.freq.state_publish_mode == StatePublishMode::Timer) {
       std::cout << " timer_missed_periods=" << timer_missed_periods
                 << " timer_no_snapshot=" << timer_no_snapshot
@@ -1734,6 +1970,13 @@ class G1UdpBridge {
   unitree::robot::ChannelSubscriberPtr<LowState> lowstate_subscriber_;
   UdpLatestSender state_sender_;
   std::unique_ptr<UdpLatestReceiver> command_receiver_;
+  std::thread command_watchdog_thread_;
+  std::atomic<bool> watchdog_stop_{false};
+  std::atomic<bool> safety_latched_{false};
+  std::atomic<bool> have_valid_command_{false};
+  std::atomic<uint64_t> last_valid_command_ns_{0};
+  std::vector<double> last_q_des_;
+  std::vector<double> last_kp_;
 
   std::atomic<bool> closed_{false};
   std::atomic<bool> fatal_shutdown_requested_{false};
@@ -1778,6 +2021,7 @@ class G1UdpBridge {
   std::atomic<uint64_t> timer_no_snapshot_count_{0};
   std::atomic<uint64_t> timer_skipped_read_count_{0};
   std::atomic<uint64_t> stdin_button_event_count_{0};
+  std::atomic<uint64_t> damping_command_count_{0};
   std::atomic<int64_t> latest_cmd_seq_{-1};
 
   std::mutex policy_delay_mutex_;
@@ -1789,12 +2033,16 @@ class G1UdpBridge {
   uint64_t last_udp_rx_ = 0;
   uint64_t last_udp_decoded_ = 0;
   uint64_t last_udp_errors_ = 0;
+  uint64_t last_udp_source_rejections_ = 0;
   SteadyClock::time_point rate_window_start_ = SteadyClock::now();
 };
 
 struct ProgramOptions {
   std::string config_path = "config/g1_bridge.yaml";
   std::string network_interface = "lo";
+  std::optional<std::string> state_host;
+  std::optional<std::string> cmd_bind_host;
+  std::optional<std::string> cmd_allowed_host;
 };
 
 ProgramOptions parse_options(int argc, char ** argv)
@@ -1818,8 +2066,38 @@ ProgramOptions parse_options(int argc, char ** argv)
       options.network_interface = arg.substr(std::string("--net=").size());
       continue;
     }
+    if (arg == "--state-host" && i + 1 < argc) {
+      options.state_host = argv[++i];
+      continue;
+    }
+    if (arg.rfind("--state-host=", 0) == 0) {
+      options.state_host = arg.substr(std::string("--state-host=").size());
+      continue;
+    }
+    if (arg == "--cmd-bind-host" && i + 1 < argc) {
+      options.cmd_bind_host = argv[++i];
+      continue;
+    }
+    if (arg.rfind("--cmd-bind-host=", 0) == 0) {
+      options.cmd_bind_host =
+          arg.substr(std::string("--cmd-bind-host=").size());
+      continue;
+    }
+    if (arg == "--cmd-allowed-host" && i + 1 < argc) {
+      options.cmd_allowed_host = argv[++i];
+      continue;
+    }
+    if (arg.rfind("--cmd-allowed-host=", 0) == 0) {
+      options.cmd_allowed_host =
+          arg.substr(std::string("--cmd-allowed-host=").size());
+      continue;
+    }
     if (arg == "-h" || arg == "--help") {
-      std::cout << "Usage: g1_udp_bridge [--net IFACE] [--config PATH]" << std::endl;
+      std::cout
+          << "Usage: g1_udp_bridge [--net IFACE] [--config PATH] "
+             "[--state-host IP] [--cmd-bind-host IP] "
+             "[--cmd-allowed-host IP]"
+          << std::endl;
       std::exit(0);
     }
     throw std::runtime_error("Unknown or incomplete argument: " + arg);
@@ -1838,6 +2116,15 @@ int main(int argc, char ** argv)
   try {
     const g1_bridge::ProgramOptions options = g1_bridge::parse_options(argc, argv);
     g1_bridge::BridgeConfig config = g1_bridge::load_config(options.config_path);
+    if (options.state_host) {
+      config.udp.state_host = *options.state_host;
+    }
+    if (options.cmd_bind_host) {
+      config.udp.cmd_bind_host = *options.cmd_bind_host;
+    }
+    if (options.cmd_allowed_host) {
+      config.udp.cmd_allowed_host = *options.cmd_allowed_host;
+    }
     g1_bridge::G1UdpBridge bridge(std::move(config), options.network_interface);
     bridge.run();
     bridge.close();

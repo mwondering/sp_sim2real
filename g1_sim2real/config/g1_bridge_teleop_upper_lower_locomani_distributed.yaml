@@ -1,0 +1,63 @@
+lowcmd_topic: "rt/lowcmd"
+lowstate_topic: "rt/lowstate"
+
+# Distributed real deployment example:
+#   policy/PICO server = 10.42.0.1
+#   robot-side computer = 10.42.0.2
+udp:
+  state_host: "10.42.0.1"
+  state_port: 55001
+  cmd_bind_host: "10.42.0.2"
+  cmd_port: 55002
+  cmd_allowed_host: "10.42.0.1"
+  recvbuf_bytes: 1048576
+  sndbuf_bytes: 1048576
+
+freq:
+  physical_hz: 1000.0
+  state_decimation: 20
+  state_publish_mode: "timer"
+
+low_level:
+  mode_pr: 0
+  damping_kd: 8.0
+  wait_lowstate_timeout_s: 0.0
+  release_motion_service: true
+  release_required: true
+  release_max_attempts: 5
+  release_sleep_s: 1.0
+
+safety:
+  enabled: true
+  command_timeout_s: 0.12
+  startup_damping: true
+  damping_publish_hz: 50.0
+  max_abs_q_des: 4.0
+  max_abs_qd_des: 1.0
+  max_kp: 120.0
+  max_kd: 10.0
+  max_command_step_rad: 0.2
+
+policy_joint_names: [
+  "left_hip_pitch_joint", "right_hip_pitch_joint", "waist_yaw_joint",
+  "left_hip_roll_joint", "right_hip_roll_joint", "waist_roll_joint",
+  "left_hip_yaw_joint", "right_hip_yaw_joint", "waist_pitch_joint",
+  "left_knee_joint", "right_knee_joint",
+  "left_shoulder_pitch_joint", "right_shoulder_pitch_joint",
+  "left_ankle_pitch_joint", "right_ankle_pitch_joint",
+  "left_shoulder_roll_joint", "right_shoulder_roll_joint",
+  "left_ankle_roll_joint", "right_ankle_roll_joint",
+  "left_shoulder_yaw_joint", "right_shoulder_yaw_joint",
+  "left_elbow_joint", "right_elbow_joint",
+  "left_wrist_roll_joint", "right_wrist_roll_joint",
+  "left_wrist_pitch_joint", "right_wrist_pitch_joint",
+  "left_wrist_yaw_joint", "right_wrist_yaw_joint"
+]
+
+real_joint_names: [
+  "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint", "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+  "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint", "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+  "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+  "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint", "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+  "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint", "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint"
+]
