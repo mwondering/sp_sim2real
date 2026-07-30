@@ -16,9 +16,26 @@ if [[ -n "${D435I_WORKER_PYTHON:-}" ]]; then
   EXTRA_ARGS+=(--worker-python "${D435I_WORKER_PYTHON}")
 fi
 
+PYTHON_CMD=()
+if [[ -n "${ROBOT_DEPTH_PYTHON:-}" ]]; then
+  if [[ ! -x "${ROBOT_DEPTH_PYTHON}" ]]; then
+    echo "[DistributedDepth] ROBOT_DEPTH_PYTHON is not executable: ${ROBOT_DEPTH_PYTHON}" >&2
+    exit 1
+  fi
+  PYTHON_CMD=("${ROBOT_DEPTH_PYTHON}")
+elif [[ -x "${SIM2REAL_ROOT}/.venv_depth/bin/python" ]]; then
+  PYTHON_CMD=("${SIM2REAL_ROOT}/.venv_depth/bin/python")
+elif command -v uv >/dev/null 2>&1; then
+  PYTHON_CMD=(uv run python)
+else
+  echo "[DistributedDepth] no Python runtime found; create .venv_depth or set ROBOT_DEPTH_PYTHON" >&2
+  exit 1
+fi
+
 echo "[DistributedDepth] robot=${ROBOT_CONTROL_IP} bind=${DEPTH_ENDPOINT}"
+echo "[DistributedDepth] python=${PYTHON_CMD[*]}"
 cd "${SIM2REAL_ROOT}"
-exec uv run python src/depth_camera_real.py \
+exec "${PYTHON_CMD[@]}" src/depth_camera_real.py \
   --config config/g1/teleop-upper-lower-locomani-real-distributed.yaml \
   --depth-bind "${DEPTH_ENDPOINT}" \
   "${EXTRA_ARGS[@]}" \
