@@ -3,6 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM2REAL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SIM2REAL_ROOT}/.." && pwd)"
+ROBOT_ENV_FILE="${ROBOT_DISTRIBUTED_ENV_FILE:-${REPO_ROOT}/robot_distributed.env}"
+
+if [[ -f "${ROBOT_ENV_FILE}" ]]; then
+  # shellcheck source=/dev/null
+  source "${ROBOT_ENV_FILE}"
+fi
 
 : "${ROBOT_CONTROL_IP:?Set ROBOT_CONTROL_IP to the robot computer control-network IPv4 address}"
 DEPTH_PORT="${DEPTH_PORT:-28811}"
