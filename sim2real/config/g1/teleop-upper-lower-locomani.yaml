@@ -10,9 +10,16 @@ kinematics_xml: "assets/g1_teleop_upper_lower_locomani.xml"
 
 switch:
   button: "right_key_two"
-  blend_duration_s: 0.4
+  blend_duration_s: 1.0
   neutral_hold_s: 0.25
   stick_deadband: 0.1
+
+# PICO left X is a best-effort software stop. It sends damping and exits the
+# high-level task, but it does not replace the G1 hardware remote emergency stop.
+pico_software_stop:
+  enabled: true
+  button: "left_key_one"
+  freshness_timeout_s: 0.25
 
 camera_process:
   source: "mujoco"

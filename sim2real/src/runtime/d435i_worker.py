@@ -3,10 +3,23 @@ from __future__ import annotations
 
 import argparse
 from io import BytesIO
+import json
+import math
 import struct
 import sys
 
 import numpy as np
+
+
+def _send_payload(stdout, payload: bytes) -> None:
+    stdout.write(struct.pack("<I", len(payload)))
+    stdout.write(payload)
+    stdout.flush()
+
+
+def _send_metadata(stdout, metadata: dict[str, object]) -> None:
+    payload = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+    _send_payload(stdout, payload)
 
 
 def _send(stdout, depth_m: np.ndarray | None) -> None:
@@ -16,10 +29,7 @@ def _send(stdout, depth_m: np.ndarray | None) -> None:
         return
     buffer = BytesIO()
     np.save(buffer, np.asarray(depth_m, dtype=np.float32), allow_pickle=False)
-    payload = buffer.getvalue()
-    stdout.write(struct.pack("<I", len(payload)))
-    stdout.write(payload)
-    stdout.flush()
+    _send_payload(stdout, buffer.getvalue())
 
 
 def main() -> None:
@@ -49,10 +59,35 @@ def main() -> None:
         rs.format.z16,
         args.fps,
     )
-    profile = pipeline.start(config)
-    scale = float(profile.get_device().first_depth_sensor().get_depth_scale())
     stdin = sys.stdin.buffer
     stdout = sys.stdout.buffer
+    profile = pipeline.start(config)
+    device = profile.get_device()
+    scale = float(device.first_depth_sensor().get_depth_scale())
+    video = profile.get_stream(rs.stream.depth).as_video_stream_profile()
+    intrinsics = video.get_intrinsics()
+    fov_x = math.degrees(
+        2.0 * math.atan(intrinsics.width / (2.0 * intrinsics.fx))
+    )
+    fov_y = math.degrees(
+        2.0 * math.atan(intrinsics.height / (2.0 * intrinsics.fy))
+    )
+    _send_metadata(
+        stdout,
+        {
+            "protocol_version": 1,
+            "device_name": str(device.get_info(rs.camera_info.name)),
+            "serial_number": str(
+                device.get_info(rs.camera_info.serial_number)
+            ),
+            "depth_scale": scale,
+            "width": int(intrinsics.width),
+            "height": int(intrinsics.height),
+            "fps": int(video.fps()),
+            "fov_x_deg": fov_x,
+            "fov_y_deg": fov_y,
+        },
+    )
     try:
         while True:
             command = stdin.readline()

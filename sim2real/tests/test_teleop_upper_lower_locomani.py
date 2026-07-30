@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import sys
 import time
 import unittest
@@ -17,6 +18,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from depth_camera import DepthRayCamera, _resize_bilinear_align_corners_false
+from runtime.d435i_source import D435iSource
 from runtime.depth_pipeline import RealDepthProcessor
 from runtime.depth_overlay import DepthPointCloudOverlay
 from runtime.dual_locomani import (
@@ -27,6 +29,7 @@ from runtime.dual_locomani import (
     PicoDualReferenceBuilder,
 )
 from runtime.shared_pico import PicoSnapshot
+from teleop_upper_lower_locomani import TeleopUpperLowerLocomaniController
 
 
 class TeleopUpperLowerLocomaniTests(unittest.TestCase):
@@ -37,7 +40,7 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
             / "config/g1/assets/g1_teleop_upper_lower_locomani.xml"
         )
 
-    def _snapshot(self, *, sticks=None, active=True, age=0.0):
+    def _snapshot(self, *, buttons=None, sticks=None, active=True, age=0.0):
         now = time.monotonic()
         return PicoSnapshot(
             seq=1,
@@ -48,7 +51,7 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
             joint_pos=DEFAULT_JOINT_POS.copy(),
             root_pos=np.array([0.0, 0.0, 0.76], dtype=np.float32),
             root_quat=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
-            buttons={},
+            buttons={} if buttons is None else buttons,
             sticks={} if sticks is None else sticks,
             active=active,
         )
@@ -161,6 +164,67 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
         self.assertFalse(reference.pico_valid)
         np.testing.assert_allclose(reference.twist[:3], 0.0)
 
+    def test_pico_left_x_requests_software_stop_only_when_control_is_fresh(self):
+        controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.pico_stop_enabled = True
+        controller.pico_stop_button = "left_key_one"
+        controller.pico_stop_timeout_s = 0.25
+        now = time.monotonic()
+        fresh = self._snapshot(buttons={"left_key_one": True})
+        self.assertTrue(
+            controller._pico_software_stop_requested(fresh, now=now)
+        )
+        stale = replace(fresh, control_timestamp=now - 1.0)
+        self.assertFalse(
+            controller._pico_software_stop_requested(stale, now=now)
+        )
+        released = replace(fresh, buttons={"left_key_one": False})
+        self.assertFalse(
+            controller._pico_software_stop_requested(released, now=now)
+        )
+
+    def test_worker_metadata_enforces_profile_serial_and_fov(self):
+        source = object.__new__(D435iSource)
+        source.width = 640
+        source.height = 360
+        source.fps = 30
+        source.serial_number = "1234"
+        source.expected_fov = (89.04, 57.9)
+        source.fov_tolerance_deg = 6.0
+        source.profile = None
+        source.depth_scale = 0.001
+        source.fov_deg = None
+        source._worker_device_serial = None
+        source._worker_device_name = None
+        metadata = {
+            "protocol_version": 1,
+            "device_name": "Intel RealSense D435I",
+            "serial_number": "1234",
+            "depth_scale": 0.001,
+            "width": 640,
+            "height": 360,
+            "fps": 30,
+            "fov_x_deg": 88.0,
+            "fov_y_deg": 58.0,
+        }
+        source._apply_worker_metadata(metadata)
+        self.assertEqual(source.device_serial, "1234")
+        self.assertEqual(source.fov_deg, (88.0, 58.0))
+        with self.assertRaisesRegex(
+            RuntimeError, "视场角与训练配置差异过大"
+        ):
+            source._apply_worker_metadata(
+                {**metadata, "fov_x_deg": 120.0}
+            )
+        with self.assertRaisesRegex(RuntimeError, "unexpected device"):
+            source._apply_worker_metadata(
+                {**metadata, "serial_number": "5678"}
+            )
+        with self.assertRaisesRegex(RuntimeError, "Expected.*D435i"):
+            source._apply_worker_metadata(
+                {**metadata, "device_name": "Intel RealSense D455"}
+            )
+
     def test_copied_dual_onnx_pair_runs_with_exact_contract(self):
         controller_names = yaml.safe_load(
             (SIM2REAL_ROOT / "config/g1/controller.yaml").read_text()
@@ -206,6 +270,10 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
         )
         self.assertEqual(config["target"], "real")
         self.assertEqual(config["camera_process"]["source"], "d435i")
+        self.assertEqual(config["switch"]["blend_duration_s"], 1.0)
+        self.assertEqual(
+            config["pico_software_stop"]["button"], "left_key_one"
+        )
         hardware = config["camera_process"]["hardware"]
         self.assertEqual(hardware["mount_body"], "pelvis")
         self.assertAlmostEqual(float(hardware["pitch_down_deg"]), 60.0)

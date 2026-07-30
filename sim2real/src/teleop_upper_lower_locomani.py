@@ -91,11 +91,25 @@ class TeleopUpperLowerLocomaniController(Controller):
             safety_cfg.get("max_abs_gyro_rad_s", 4.0)
         )
         self.max_tilt_rad = float(safety_cfg.get("max_tilt_rad", 0.7))
+        pico_stop_cfg = task_config.get("pico_software_stop", {})
+        self.pico_stop_enabled = bool(pico_stop_cfg.get("enabled", True))
+        self.pico_stop_button = str(
+            pico_stop_cfg.get("button", "left_key_one")
+        ).strip()
+        if not self.pico_stop_button:
+            raise ValueError("pico_software_stop.button must not be empty")
+        self.pico_stop_timeout_s = float(
+            pico_stop_cfg.get("freshness_timeout_s", self.depth_timeout_s)
+        )
+        if self.pico_stop_timeout_s <= 0.0:
+            raise ValueError(
+                "pico_software_stop.freshness_timeout_s must be positive"
+            )
         self.blend_steps = max(
             1,
             int(
                 round(
-                    float(switch_cfg.get("blend_duration_s", 0.4))
+                    float(switch_cfg.get("blend_duration_s", 1.0))
                     / self.control_dt
                 )
             ),
@@ -112,6 +126,17 @@ class TeleopUpperLowerLocomaniController(Controller):
             f"terrain_class={args.terrain_class}, "
             f"blend_steps={self.blend_steps}, depth<-{camera_cfg['depth_connect']}"
         )
+
+    def _pico_software_stop_requested(
+        self, snapshot, *, now: float | None = None
+    ) -> bool:
+        if not self.pico_stop_enabled:
+            return False
+        if not bool(snapshot.buttons.get(self.pico_stop_button, False)):
+            return False
+        timestamp = float(snapshot.control_timestamp)
+        age = (time.monotonic() if now is None else float(now)) - timestamp
+        return -0.1 <= age <= self.pico_stop_timeout_s
 
     def _whole_body_command(self, action: np.ndarray) -> ControlCommand:
         policy = self.policies["tracking"]
@@ -314,7 +339,7 @@ class TeleopUpperLowerLocomaniController(Controller):
         self._blend_step = 0
         print(
             "[TeleopLocomani] running: right A=start PICO, right B=switch policy, "
-            "left X=stop PICO"
+            "left X=software stop (damping + task exit)"
         )
         while True:
             if not self.process_state(wait_next=True, timeout_s=1.0):
@@ -328,10 +353,20 @@ class TeleopUpperLowerLocomaniController(Controller):
             if self.btn_rise["stop"]:
                 break
 
+            fullbody.source.poll_control()
+            snapshot = self.pico_store.snapshot()
+            if self._pico_software_stop_requested(snapshot):
+                print(
+                    "[TeleopLocomani] PICO SOFTWARE STOP: "
+                    f"{self.pico_stop_button}; sending damping and exiting"
+                )
+                self.set_damping_cmd()
+                self.send_cmd()
+                return
+
             fullbody.update_obs()
             whole_action = fullbody.compute_action()
             whole_command = self._whole_body_command(whole_action)
-            snapshot = self.pico_store.snapshot()
             depth = self._depth()
             now = time.monotonic()
             pico_ready = bool(

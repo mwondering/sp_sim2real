@@ -679,6 +679,7 @@ class VRMotionSource(MotionSourceBase):
 
         latest_buttons: Optional[dict] = None
         latest_sticks: Optional[dict] = None
+        pressed_buttons: set[str] = set()
         while True:
             try:
                 raw = self._ctrl_sock.recv_string(flags=zmq.NOBLOCK)
@@ -695,6 +696,11 @@ class VRMotionSource(MotionSourceBase):
             buttons = self._extract_buttons(payload)
             if buttons is not None:
                 latest_buttons = buttons
+                pressed_buttons.update(
+                    str(name)
+                    for name, value in buttons.items()
+                    if isinstance(value, (bool, np.bool_)) and bool(value)
+                )
             sticks = self._extract_sticks(payload)
             if sticks is not None:
                 latest_sticks = sticks
@@ -702,6 +708,11 @@ class VRMotionSource(MotionSourceBase):
         if latest_sticks is not None:
             self._latest_control_sticks = {str(k): float(v) for k, v in latest_sticks.items()}
             self._update_hand_from_sticks()
+
+        if latest_buttons is not None and pressed_buttons:
+            latest_buttons = dict(latest_buttons)
+            for name in pressed_buttons:
+                latest_buttons[name] = True
 
         if self._shared_store is not None and (
             latest_buttons is not None or latest_sticks is not None
@@ -747,6 +758,10 @@ class VRMotionSource(MotionSourceBase):
             if self._shared_store is not None:
                 self._shared_store.publish_control(active=False)
             print("[VRMotionSource] VR start requested from control button")
+
+    def poll_control(self) -> None:
+        """Drain controller input before the task computes its next command."""
+        self._drain_control()
 
     def _future_horizon(self) -> int:
         if self.policy.ref_len <= 0:
@@ -1080,7 +1095,7 @@ class VRMotionSource(MotionSourceBase):
         super().on_fade_out()
 
     def post_step(self):
-        self._drain_control()
+        self.poll_control()
         last_aligned_frame = self._drain_replies()
         if last_aligned_frame is not None:
             self._req_inflight = False

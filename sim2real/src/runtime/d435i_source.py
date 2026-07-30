@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+import json
 import math
 import os
 from pathlib import Path
@@ -52,6 +53,8 @@ class D435iSource:
         self.worker = None
         self.depth_scale = 0.001
         self.fov_deg: tuple[float, float] | None = None
+        self._worker_device_serial: str | None = None
+        self._worker_device_name: str | None = None
         self._worker_buffer = bytearray()
         try:
             import pyrealsense2 as rs
@@ -91,7 +94,10 @@ class D435iSource:
                 )
             ) from exc
 
-        sensor = self.profile.get_device().first_depth_sensor()
+        device = self.profile.get_device()
+        device_name = str(device.get_info(self.rs.camera_info.name))
+        self._validate_device_name(device_name)
+        sensor = device.first_depth_sensor()
         self.depth_scale = float(sensor.get_depth_scale())
         video = self.profile.get_stream(
             self.rs.stream.depth
@@ -114,7 +120,11 @@ class D435iSource:
     @property
     def device_serial(self) -> str:
         if self.profile is None:
-            return self.serial_number or "worker-selected"
+            return (
+                self._worker_device_serial
+                or self.serial_number
+                or "worker-unknown"
+            )
         try:
             return str(
                 self.profile.get_device().get_info(
@@ -136,6 +146,13 @@ class D435iSource:
                 "D435i 内参视场角与训练配置差异过大："
                 f"actual={self.fov_deg[0]:.2f}x{self.fov_deg[1]:.2f}deg, "
                 f"expected={self.expected_fov[0]:.2f}x{self.expected_fov[1]:.2f}deg"
+            )
+
+    @staticmethod
+    def _validate_device_name(device_name: str) -> None:
+        if "d435i" not in str(device_name).strip().lower():
+            raise RuntimeError(
+                f"Expected an Intel RealSense D435i, got {device_name!r}"
             )
 
     def _resolve_worker_python(self) -> str:
@@ -196,10 +213,83 @@ class D435iSource:
             stderr=subprocess.PIPE,
             bufsize=0,
         )
+        try:
+            payload = self._read_worker_payload(
+                timeout_s=max(10.0, 2.0 * self.timeout_s),
+                allow_header_timeout=False,
+            )
+            if not payload:
+                raise RuntimeError("D435i worker did not return startup metadata")
+            try:
+                metadata = json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "D435i worker returned invalid startup metadata"
+                ) from exc
+            self._apply_worker_metadata(metadata)
+        except Exception:
+            if self.worker.poll() is None:
+                self.worker.terminate()
+                try:
+                    self.worker.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    self.worker.kill()
+                    self.worker.wait(timeout=2.0)
+            self.worker = None
+            raise
         print(
             f"[D435i] worker python={worker_python} "
-            f"stream={self.width}x{self.height}@{self.fps}"
+            f"device={self._worker_device_name} serial={self.device_serial} "
+            f"stream={self.width}x{self.height}@{self.fps} "
+            f"scale={self.depth_scale:.6g} "
+            f"fov={self.fov_deg[0]:.2f}x{self.fov_deg[1]:.2f}deg"
         )
+
+    def _apply_worker_metadata(self, metadata: object) -> None:
+        if not isinstance(metadata, dict):
+            raise RuntimeError("D435i worker startup metadata must be an object")
+        if int(metadata.get("protocol_version", -1)) != 1:
+            raise RuntimeError("Unsupported D435i worker protocol version")
+        actual_profile = (
+            int(metadata.get("width", -1)),
+            int(metadata.get("height", -1)),
+            int(metadata.get("fps", -1)),
+        )
+        expected_profile = (self.width, self.height, self.fps)
+        if actual_profile != expected_profile:
+            raise RuntimeError(
+                "D435i worker stream profile mismatch: "
+                f"actual={actual_profile}, expected={expected_profile}"
+            )
+        depth_scale = float(metadata.get("depth_scale", float("nan")))
+        fov = (
+            float(metadata.get("fov_x_deg", float("nan"))),
+            float(metadata.get("fov_y_deg", float("nan"))),
+        )
+        if (
+            not math.isfinite(depth_scale)
+            or depth_scale <= 0.0
+            or not all(math.isfinite(value) and value > 0.0 for value in fov)
+        ):
+            raise RuntimeError("D435i worker returned invalid scale or FOV")
+        actual_serial = str(metadata.get("serial_number", "")).strip()
+        if not actual_serial:
+            raise RuntimeError("D435i worker did not report a device serial")
+        if self.serial_number and actual_serial != self.serial_number:
+            raise RuntimeError(
+                "D435i worker selected an unexpected device: "
+                f"actual={actual_serial}, expected={self.serial_number}"
+            )
+        self.depth_scale = depth_scale
+        self.fov_deg = fov
+        self._worker_device_serial = actual_serial
+        self._worker_device_name = str(
+            metadata.get("device_name", "")
+        ).strip()
+        if not self._worker_device_name:
+            raise RuntimeError("D435i worker did not report a device name")
+        self._validate_device_name(self._worker_device_name)
+        self._validate_fov()
 
     def capture(self) -> D435iFrame | None:
         if self.mode == "worker":
@@ -229,14 +319,37 @@ class D435iSource:
             raise RuntimeError("D435i worker is not running")
         self.worker.stdin.write(b"R\n")
         self.worker.stdin.flush()
+
+        payload = self._read_worker_payload(
+            timeout_s=self.timeout_s,
+            allow_header_timeout=True,
+        )
+        if not payload:
+            return None
+        depth_m = np.load(BytesIO(payload), allow_pickle=False).astype(
+            np.float32
+        )
+        return D435iFrame(
+            depth_m=depth_m, capture_monotonic=time.monotonic()
+        )
+
+    def _read_worker_payload(
+        self, *, timeout_s: float, allow_header_timeout: bool
+    ) -> bytes | None:
+        if self.worker is None or self.worker.stdout is None:
+            raise RuntimeError("D435i worker is not running")
         fd = self.worker.stdout.fileno()
-        deadline = time.monotonic() + self.timeout_s
+        deadline = time.monotonic() + float(timeout_s)
         while len(self._worker_buffer) < 4:
             readable, _, _ = select.select(
                 [fd], [], [], max(0.0, deadline - time.monotonic())
             )
             if not readable:
-                return None
+                if allow_header_timeout:
+                    return None
+                raise RuntimeError(
+                    "Timed out waiting for D435i worker startup metadata"
+                )
             chunk = os.read(fd, 65536)
             if not chunk:
                 self._raise_worker_exit()
@@ -244,7 +357,11 @@ class D435iSource:
         payload_size = struct.unpack("<I", self._worker_buffer[:4])[0]
         del self._worker_buffer[:4]
         if payload_size == 0:
-            return None
+            return b""
+        if payload_size > 128 * 1024 * 1024:
+            raise RuntimeError(
+                f"D435i worker payload is too large: {payload_size} bytes"
+            )
         while len(self._worker_buffer) < payload_size:
             readable, _, _ = select.select(
                 [fd], [], [], max(0.0, deadline - time.monotonic())
@@ -257,12 +374,7 @@ class D435iSource:
             self._worker_buffer.extend(chunk)
         payload = bytes(self._worker_buffer[:payload_size])
         del self._worker_buffer[:payload_size]
-        depth_m = np.load(BytesIO(payload), allow_pickle=False).astype(
-            np.float32
-        )
-        return D435iFrame(
-            depth_m=depth_m, capture_monotonic=time.monotonic()
-        )
+        return payload
 
     def _raise_worker_exit(self) -> None:
         stderr = ""
