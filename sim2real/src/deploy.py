@@ -100,7 +100,13 @@ class Controller:
 
         tracking_cfg_path = tracking_config_path(self.args.robot, self.args.tracking_config)
         print(f"[Deploy] tracking config: {tracking_cfg_path}")
-        tracking_policy = TrackingPolicyRaw("tracking", get_config(tracking_cfg_path), self)
+        tracking_cfg = get_config(tracking_cfg_path)
+        pico_store = getattr(self.args, "pico_store", None)
+        if pico_store is not None:
+            tracking_cfg._pico_store = pico_store
+        if bool(getattr(self.args, "force_vr_motion_source", False)):
+            tracking_cfg.motion_source["type"] = "vr"
+        tracking_policy = TrackingPolicyRaw("tracking", tracking_cfg, self)
         self.policies = {"tracking": tracking_policy}
         if tracking_policy.controller_default_qpos is not None:
             self.default_qpos[:] = tracking_policy.controller_default_qpos

@@ -8,6 +8,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R, Slerp
 
 from runtime.math_utils import _linspace_rows, _slerp, _yaw_component_wxyz
+from runtime.shared_pico import PicoFrameStore
 from common.udp_latest import LatestPacket, UDPLatestReceiver
 from common.utils import DictToClass
 
@@ -507,6 +508,10 @@ class VRMotionSource(MotionSourceBase):
         self._prev_start_btn = False
         self._prev_stop_btn = False
         self._latest_control_sticks: dict[str, float] = {}
+        shared_store = getattr(policy_cfg, "_pico_store", None)
+        if shared_store is not None and not isinstance(shared_store, PicoFrameStore):
+            raise TypeError("_pico_store must be a PicoFrameStore")
+        self._shared_store: PicoFrameStore | None = shared_store
         self._hand_control_cfg = dict(getattr(policy.controller.config, "hand_control", {}))
         self._vr_stats_interval_s = 1.0
         self._vr_stats_last_monotonic = time.monotonic()
@@ -618,22 +623,22 @@ class VRMotionSource(MotionSourceBase):
         if buttons is None:
             return None
 
-        def axis_y(key: str) -> Optional[float]:
+        def axis_xy(key: str) -> Optional[tuple[float, float]]:
             axis = buttons.get(key, None)
             if not isinstance(axis, (list, tuple)) or len(axis) < 2:
                 return None
             try:
-                return float(axis[1])
+                return float(axis[0]), float(axis[1])
             except (TypeError, ValueError):
                 return None
 
         out = {}
-        left_y = axis_y("left_axis")
-        right_y = axis_y("right_axis")
-        if left_y is not None:
-            out["ly"] = left_y
-        if right_y is not None:
-            out["ry"] = right_y
+        left = axis_xy("left_axis")
+        right = axis_xy("right_axis")
+        if left is not None:
+            out["lx"], out["ly"] = left
+        if right is not None:
+            out["rx"], out["ry"] = right
         return out if out else None
 
     def _update_hand_from_sticks(self) -> None:
@@ -698,6 +703,15 @@ class VRMotionSource(MotionSourceBase):
             self._latest_control_sticks = {str(k): float(v) for k, v in latest_sticks.items()}
             self._update_hand_from_sticks()
 
+        if self._shared_store is not None and (
+            latest_buttons is not None or latest_sticks is not None
+        ):
+            self._shared_store.publish_control(
+                buttons=latest_buttons,
+                sticks=latest_sticks,
+                active=self._vr_active,
+            )
+
         if latest_buttons is None:
             return
 
@@ -717,6 +731,8 @@ class VRMotionSource(MotionSourceBase):
             self._vr_align_ready = False
             self._vr_in_transition = False
             self._vr_transition_count = 0
+            if self._shared_store is not None:
+                self._shared_store.publish_control(active=False)
             print("[VRMotionSource] VR stop from control button")
 
         if start_rise:
@@ -728,6 +744,8 @@ class VRMotionSource(MotionSourceBase):
             self._vr_align_ready = False
             self._vr_in_transition = False
             self._vr_transition_count = 0
+            if self._shared_store is not None:
+                self._shared_store.publish_control(active=False)
             print("[VRMotionSource] VR start requested from control button")
 
     def _future_horizon(self) -> int:
@@ -996,6 +1014,12 @@ class VRMotionSource(MotionSourceBase):
             }
             self.policy.append_ref_frames(seg)
             last_aligned_frame = out_frames[-1]
+            if self._shared_store is not None:
+                self._shared_store.publish_frame(
+                    last_aligned_frame,
+                    joint_names=self.policy.obs_joint_names,
+                    active=True,
+                )
             self._bump_vr_stat("append")
             self._bump_vr_stat("append_frames", len(out_frames))
         return last_aligned_frame
@@ -1038,6 +1062,8 @@ class VRMotionSource(MotionSourceBase):
         self._vr_anchor_root_pos = None
         self._vr_anchor_root_quat = None
         self._vr_align_ready = False
+        if self._shared_store is not None:
+            self._shared_store.publish_control(active=False)
 
     def on_fade_out(self):
         self._vr_user_enabled = False
@@ -1081,6 +1107,8 @@ class VRMotionSource(MotionSourceBase):
         self._vr_anchor_root_quat = None
         self._vr_align_ready = False
         self._pending_start_request = False
+        if self._shared_store is not None:
+            self._shared_store.publish_control(active=False)
         if self._req_sock is not None:
             try:
                 self._req_sock.close(0)

@@ -15,4 +15,8 @@
 /tools
 /teleop/debs
 /config/*/ckpts
+!/config/g1/ckpts
+/config/g1/ckpts/*
+!/config/g1/ckpts/MJLab_Locomani
+!/config/g1/ckpts/MJLab_Locomani/*
 /config/*/motions

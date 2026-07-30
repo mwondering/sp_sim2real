@@ -131,8 +131,10 @@ class RobotKinematics:
         self,
         joint_pos: np.ndarray,
         body_names: Sequence[str],
+        *,
+        reference_body_name: str = "pelvis",
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Return body poses in the pelvis frame for one or more joint frames."""
+        """Return body poses relative to ``reference_body_name``."""
         joints = np.asarray(joint_pos, dtype=np.float64)
         single = joints.ndim == 1
         if single:
@@ -142,6 +144,7 @@ class RobotKinematics:
                 f"joint_pos must have shape [T, {len(self.joint_names)}], got {joints.shape}"
             )
         body_ids = self._body_ids(body_names)
+        reference_body_id = int(self._body_ids((reference_body_name,))[0])
         positions = np.empty((joints.shape[0], len(body_ids), 3), dtype=np.float32)
         quaternions = np.empty((joints.shape[0], len(body_ids), 4), dtype=np.float32)
 
@@ -152,8 +155,8 @@ class RobotKinematics:
             self.data.qvel[:] = 0.0
             mujoco.mj_forward(self.model, self.data)
 
-            root_pos = self.data.xpos[self.root_body_id]
-            root_quat = self.data.xquat[self.root_body_id]
+            root_pos = self.data.xpos[reference_body_id]
+            root_quat = self.data.xquat[reference_body_id]
             positions[frame_index] = _quat_apply_inv(
                 root_quat,
                 self.data.xpos[body_ids] - root_pos,

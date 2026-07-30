@@ -1,0 +1,54 @@
+task_name: "teleop-upper-lower-locomani"
+target: "real"
+
+# Same exported MJLab dual policy and joint contract as the verified sim2sim task.
+lower_onnx: "ckpts/MJLab_Locomani/lower.onnx"
+upper_onnx: "ckpts/MJLab_Locomani/upper.onnx"
+kinematics_xml: "assets/g1_teleop_upper_lower_locomani.xml"
+
+switch:
+  button: "right_key_two"
+  blend_duration_s: 0.5
+  # A policy switch is accepted only after all PICO sticks remain neutral.
+  neutral_hold_s: 0.3
+  stick_deadband: 0.1
+
+camera_process:
+  source: "d435i"
+  depth_bind: "tcp://*:28811"
+  depth_connect: "tcp://127.0.0.1:28811"
+  update_hz: 30.0
+  timeout_s: 0.25
+  max_invalid_fraction: 0.6
+  hardware:
+    width: 640
+    height: 360
+    fps: 30
+    serial_number: ""
+    worker_python: ""
+    frame_timeout_s: 0.5
+    expected_fov_x_deg: 89.04
+    expected_fov_y_deg: 57.9
+    fov_tolerance_deg: 6.0
+    mount_body: "pelvis"
+    mount_position_m: [0.12546158, 0.0197, -0.05952004]
+    pitch_down_deg: 60.0
+  preprocess:
+    # Exact MJLab policy-space contract: raw 36x64, normalize by 2 m,
+    # crop [top=10,left=10,right=10], resize back to 36x64.
+    min_distance_m: 0.05
+    normalization_max_distance_m: 2.0
+    invalid_value: -1.0
+    valid_threshold: 0.5
+    crop_top: 10
+    crop_bottom: 0
+    crop_left: 10
+    crop_right: 10
+    edge_fill_left_columns: 24
+
+safety:
+  state_timeout_is_fatal: true
+  safe_hold_kp_scale: 0.5
+  safe_hold_min_kd: 2.0
+  max_abs_gyro_rad_s: 4.0
+  max_tilt_rad: 0.7

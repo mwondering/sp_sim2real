@@ -1,6 +1,6 @@
 # Deployment profile for SP_Tracking SPV5-2 actors (8199-D input).
-# Copy the exported policy.onnx and policy.json into ckpts/G1_SPV5_2/.
-policy_path: "/home/lenovo/workspace/UNICTL/motion_tracking_sim2real/ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.onnx"
+# Keep the ONNX and its JSON sidecar together in this repository.
+policy_path: "../../../ckpts/0729_baoshou_waist_dataclean_changedr_nohandxml/policy_28000.onnx"
 actor_profile: "spv5_2"
 use_policy_metadata: true
 # Fallback for exporters whose sidecar omits the robot/action/PD contract.

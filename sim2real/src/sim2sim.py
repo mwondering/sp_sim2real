@@ -20,6 +20,8 @@ from common.udp_latest import LatestPacket
 from common.udp_transport import UDPRobotLow
 from common.utils import DictToClass, Timer
 from paths import SUPPORTED_ROBOTS, bridge_config_path
+from runtime.depth_overlay import DepthPointCloudOverlay
+from runtime.zmq_stream import ArrayPublisher
 
 np.set_printoptions(formatter={"float": lambda x: "{0:0.2f}".format(x)})
 
@@ -257,6 +259,59 @@ class Sim2Sim:
         self._policy_delay_max_ms = 0.0
 
         self.transport = UDPRobotLow(config.udp, on_command_packet=self.cmd_sub_handler)
+        state_stream_cfg = _cfg_value(config, "sim_state_stream", "sim_state_stream", {})
+        self._sim_state_publisher = None
+        self._sim_state_seq = 0
+        if bool(_cfg_value(state_stream_cfg, "enabled", "sim_state_stream.enabled", False)):
+            bind = str(
+                _cfg_value(
+                    state_stream_cfg,
+                    "bind",
+                    "sim_state_stream.bind",
+                    "tcp://*:28810",
+                )
+            )
+            self._sim_state_publisher = ArrayPublisher(bind, topic="sim_state")
+            print(f"{self.log_prefix} sim-state stream bind={bind}")
+        depth_debug_cfg = _cfg_value(config, "depth_debug", "depth_debug", {})
+        self._depth_overlay = None
+        if bool(_cfg_value(depth_debug_cfg, "enabled", "depth_debug.enabled", False)):
+            self._depth_overlay = DepthPointCloudOverlay(
+                self.model,
+                self.data,
+                connect=str(
+                    _cfg_value(
+                        depth_debug_cfg,
+                        "connect",
+                        "depth_debug.connect",
+                        "tcp://127.0.0.1:28811",
+                    )
+                ),
+                site_name=str(
+                    _cfg_value(
+                        depth_debug_cfg,
+                        "site_name",
+                        "depth_debug.site_name",
+                        "depth_camera",
+                    )
+                ),
+                stride=int(
+                    _cfg_value(
+                        depth_debug_cfg,
+                        "stride",
+                        "depth_debug.stride",
+                        4,
+                    )
+                ),
+                point_size=float(
+                    _cfg_value(
+                        depth_debug_cfg,
+                        "point_size",
+                        "depth_debug.point_size",
+                        0.012,
+                    )
+                ),
+            )
 
         self.keyboard_thread = threading.Thread(
             target=listen_keyboard,
@@ -473,6 +528,10 @@ class Sim2Sim:
             quat = self.data.qpos[3:7].copy().astype(np.float32)
             gyro = self._gyro()
             linacc = self._linacc()
+            full_state = np.concatenate((self.data.qpos, self.data.qvel)).astype(
+                np.float32
+            )
+            sim_time = float(self.data.time)
         self.transport.send_state(
             q=q,
             dq=dq,
@@ -484,6 +543,14 @@ class Sim2Sim:
             buttons=self._buttons_snapshot(),
             sticks={name: 0.0 for name in STICK_KEYS},
         )
+        if self._sim_state_publisher is not None:
+            self._sim_state_publisher.send(
+                full_state,
+                seq=self._sim_state_seq,
+                sim_time=sim_time,
+                metadata={"nq": int(self.model.nq), "nv": int(self.model.nv)},
+            )
+            self._sim_state_seq += 1
 
     def _publish_state_if_due(self):
         self._physics_tick += 1
@@ -656,6 +723,8 @@ class Sim2Sim:
             return False
         self._viewer_tick += 1
         if (self._viewer_tick % self.viewer_decim) == 0:
+            if self._depth_overlay is not None:
+                self._depth_overlay.update(self.viewer)
             self.viewer.sync()
         return True
 
@@ -688,6 +757,10 @@ class Sim2Sim:
         self._set_button("stop", True)
         stop_listening()
         self.transport.close()
+        if self._sim_state_publisher is not None:
+            self._sim_state_publisher.close()
+        if self._depth_overlay is not None:
+            self._depth_overlay.close()
         if self.keyboard_thread.is_alive() and threading.current_thread() is not self.keyboard_thread:
             self.keyboard_thread.join(timeout=1.0)
         sys.exit(0)
