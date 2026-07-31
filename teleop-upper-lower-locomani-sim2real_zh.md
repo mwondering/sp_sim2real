@@ -6,7 +6,8 @@
 
 - D435i 安装在 pelvis 附近，向下倾斜约 60°。
 - 配置位姿为 `[0.12546, 0.0197, -0.05952] m`、下倾 `60°`，与 MJLab/XML 相机挂载一致。
-- D435i 独立进程以 `640x360@30 Hz` 采集 Z16 深度，发布策略实际读取的 `(1,36,64)` 数据。
+- D435i 独立进程以 `640x360@30 Hz` 采集并发布原始 Z16 深度；策略进程在接收端生成
+  `(1,36,64)` 输入。
 - 策略/真机状态频率为 50 Hz；相机超时阈值为 0.25 秒。
 - 初始模式为全身遥操作；PICO 右手 B 在全身与上下肢分离模式间切换。
 - PICO 左手 X 是软件停止键：控制包有效时立即发送 damping 并结束高层任务。
@@ -20,7 +21,6 @@ Python 环境：
 cd /home/lenovo/workspace/UNICTL/motion_tracking_sim2real_self/sim2real
 uv sync
 bash install_xrobottoolkit_sdk.sh
-uv pip install pyrealsense2
 ```
 
 需要单独显示深度图时，再安装：
@@ -29,7 +29,29 @@ uv pip install pyrealsense2
 uv pip install opencv-python
 ```
 
-编译新 bridge：
+G1 机载计算机只需克隆独立相机分支：
+
+```bash
+git clone --branch g1-camera-stream --single-branch \
+  https://github.com/mwondering/sp_sim2real.git /home/unitree/g1-camera-stream
+cd /home/unitree/g1-camera-stream
+
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="${HOME}/.local/bin:${PATH}"
+
+rm -rf .venv
+uv python install 3.12
+uv venv --python 3.12 .venv
+uv pip install \
+  --python .venv/bin/python \
+  --index-url https://pypi.org/simple \
+  -r requirements.txt
+```
+
+该分支只包含 D435i 读取和 ZMQ 发送端，不包含策略、bridge、ONNX、MuJoCo 或 PICO。
+统一环境固定使用 Python 3.12。
+
+按原 HEFT 流程编译 bridge：
 
 ```bash
 cd /home/lenovo/workspace/UNICTL/motion_tracking_sim2real_self/g1_sim2real
@@ -52,11 +74,17 @@ test -f config/g1/ckpts/MJLab_Locomani/lower.onnx
 test -f config/g1/ckpts/MJLab_Locomani/upper.onnx
 ```
 
-确认 D435i：
+在策略服务器设置 G1 SSH 地址及相机分支路径，并确认 D435i：
 
 ```bash
-rs-enumerate-devices
-uv run python -c 'import pyrealsense2 as rs; print(rs.__file__)'
+export ROBOT_IP="<G1机载计算机的192.168.123.164>"
+export ROBOT_SSH="unitree@${ROBOT_IP}"
+export G1_CAMERA_ROOT=/home/unitree/g1-camera-stream
+
+ssh "${ROBOT_SSH}" \
+  "cd '${G1_CAMERA_ROOT}' && \
+   .venv/bin/python -c \
+   'import pyrealsense2 as rs; print(rs.__file__, rs.pipeline)'"
 ```
 
 确认 G1 有线网卡，例如：
@@ -93,48 +121,52 @@ uv run python teleop/serve_xrobot_teleop.py --robot g1
 
 ### 终端 3：D435i 独立深度进程
 
-先启动相机发布：
+从策略服务器通过 SSH 启动 G1 上的独立相机分支。远端发布器默认监听
+`tcp://*:28811`，只需知道 SSH 地址和分支绝对路径：
+
+```bash
+export ROBOT_IP="<G1机载计算机的192.168.123.x地址>"
+export ROBOT_SSH="unitree@${ROBOT_IP}"
+export G1_CAMERA_ROOT=/home/unitree/g1-camera-stream
+
+ssh -t "${ROBOT_SSH}" \
+  "cd '${G1_CAMERA_ROOT}' && \
+   exec .venv/bin/python depth_camera_sender.py"
+```
+
+可在策略服务器的另一个终端处理并显示原始深度，不影响相机发布和策略：
 
 ```bash
 cd /home/lenovo/workspace/UNICTL/motion_tracking_sim2real_self/sim2real
-uv run src/depth_camera_real.py \
-  --config config/g1/teleop-upper-lower-locomani-real.yaml
+export ROBOT_IP="<G1机载计算机的192.168.123.x地址>"
+uv run src/view_depth_stream.py \
+  --config config/g1/teleop-upper-lower-locomani-real.yaml \
+  --connect "tcp://${ROBOT_IP}:28811"
 ```
 
-可在任意另一个终端附加/关闭可视化，不影响相机发布和策略：
-
-```bash
-cd /home/lenovo/workspace/UNICTL/motion_tracking_sim2real_self/sim2real
-uv run src/view_depth_stream.py
-```
-
-窗口中近处偏红、远处偏蓝黑，无效像素为黑色；按 `q` 或 `Esc` 只关闭查看器。相机进程自身也保留 `--show-depth` 便捷模式，但正式运行建议用独立查看器，避免 GUI 影响采集进程。
+窗口中近处偏红、远处偏蓝黑，无效像素为黑色；按 `q` 或 `Esc` 只关闭查看器。相机进程
+只读取并发送原始 Z16 帧，不再包含预处理或 GUI。
 
 多相机时指定序列号：
 
 ```bash
-uv run src/depth_camera_real.py \
-  --config config/g1/teleop-upper-lower-locomani-real.yaml \
-  --serial-number <D435I_SERIAL>
-```
-
-如果 `pyrealsense2` 只能在另一个 Python 环境导入：
-
-```bash
-uv run src/depth_camera_real.py \
-  --config config/g1/teleop-upper-lower-locomani-real.yaml \
-  --worker-python /path/to/python
+ssh -t "${ROBOT_SSH}" \
+  "cd '${G1_CAMERA_ROOT}' && \
+   exec .venv/bin/python depth_camera_sender.py \
+   --serial-number <D435I_SERIAL>"
 ```
 
 正常日志应包含：
 
 ```text
 [D435i] ... stream=640x360@30 ... fov=...deg
-[DepthReal] D435i(...) -> tcp://*:28811 shape=(1,36,64)
+[G1Depth] D435i(...) -> tcp://*:28811 raw-z16 shape=(360,640) scale=...m/unit
 ```
 
-直接模式和 worker 模式都会读取实际设备序列号、深度比例与内参，并校验
-`640x360@30` 和训练视场角；worker 握手缺字段或校验不通过时，相机进程会拒绝启动。
+相机进程会读取实际设备序列号、深度比例与内参，并校验
+`640x360@30` 和训练视场角；校验不通过时会拒绝启动。
+机器人侧发送 `uint16[360,640]` 原始帧和深度比例，策略所需的米制转换、无效值处理、
+裁剪、缩放与归一化均在接收端完成。
 
 ### 终端 4：G1 底层 bridge
 
@@ -162,10 +194,12 @@ HEFT：
 
 ```bash
 cd /home/lenovo/workspace/UNICTL/motion_tracking_sim2real_self/sim2real
+export ROBOT_IP="<G1机载计算机的192.168.123.x地址>"
 uv run src/teleop_upper_lower_locomani.py \
   --target real \
   --whole-body-policy heft \
-  --terrain-class 2
+  --terrain-class 2 \
+  --depth-connect "tcp://${ROBOT_IP}:28811"
 ```
 
 SPV5-2：
@@ -174,7 +208,8 @@ SPV5-2：
 uv run src/teleop_upper_lower_locomani.py \
   --target real \
   --whole-body-policy spv5_2 \
-  --terrain-class 2
+  --terrain-class 2 \
+  --depth-connect "tcp://${ROBOT_IP}:28811"
 ```
 
 首次只建议使用已经充分验证的 HEFT。不要在一次运行中切换 HEFT 与 SPV5-2。
@@ -241,14 +276,19 @@ bridge 的 watchdog 锁定后日志包含：
 检查进程和端口：
 
 ```bash
-pgrep -af 'serve_xrobot_teleop|depth_camera_real|g1_udp_bridge|teleop_upper_lower'
-ss -ltnp | rg '28701|28702|28703|28811'
+pgrep -af 'serve_xrobot_teleop|g1_udp_bridge|teleop_upper_lower'
+ss -ltnp | rg '28701|28702|28703'
+ss -tnp | rg '28811'
+
+export ROBOT_SSH="unitree@<G1机载计算机的192.168.123.x地址>"
+ssh "${ROBOT_SSH}" \
+  "pgrep -af depth_camera_sender; ss -ltnp | grep 28811"
 ```
 
 相机窗口全黑：
 
 - 确认镜头保护膜已移除、USB 3 连接正常；
-- 用 `rs-enumerate-devices` 检查深度流；
+- 在 G1 上用 `rs-enumerate-devices` 检查深度流；
 - 查看终端 `invalid=`；持续超过 60% 时任务不会进入上下肢分离模式；
 - 室外强光、反光/透明材料和过近物体会造成 D435i 无效深度。
 

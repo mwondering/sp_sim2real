@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Mapping
+
 import numpy as np
 
 
@@ -95,6 +97,35 @@ class RealDepthProcessor:
         top, bottom, left, right = self.crop
         if min(self.crop) < 0 or top + bottom >= 36 or left + right >= 64:
             raise ValueError(f"Invalid policy-frame crop: {self.crop}")
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, object]) -> "RealDepthProcessor":
+        return cls(
+            min_distance=float(config.get("min_distance_m", 0.05)),
+            normalization_max_distance=float(
+                config.get("normalization_max_distance_m", 2.0)
+            ),
+            invalid_value=float(config.get("invalid_value", -1.0)),
+            valid_threshold=float(config.get("valid_threshold", 0.5)),
+            crop_top=int(config.get("crop_top", 10)),
+            crop_bottom=int(config.get("crop_bottom", 0)),
+            crop_left=int(config.get("crop_left", 10)),
+            crop_right=int(config.get("crop_right", 10)),
+            edge_fill_left_columns=int(
+                config.get("edge_fill_left_columns", 24)
+            ),
+        )
+
+    def process_raw(
+        self, depth_raw: np.ndarray, *, depth_scale: float
+    ) -> tuple[np.ndarray, dict[str, float]]:
+        raw = np.asarray(depth_raw)
+        if raw.dtype != np.uint16:
+            raise ValueError(f"Expected raw uint16 depth, got {raw.dtype}")
+        scale = float(depth_scale)
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ValueError(f"Invalid D435i depth scale: {scale}")
+        return self.process(raw.astype(np.float32) * scale)
 
     def process(
         self, depth_m: np.ndarray

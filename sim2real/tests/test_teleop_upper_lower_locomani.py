@@ -18,7 +18,6 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from depth_camera import DepthRayCamera, _resize_bilinear_align_corners_false
-from runtime.d435i_source import D435iSource
 from runtime.depth_pipeline import RealDepthProcessor
 from runtime.depth_overlay import DepthPointCloudOverlay
 from runtime.dual_locomani import (
@@ -29,6 +28,8 @@ from runtime.dual_locomani import (
     PicoDualReferenceBuilder,
 )
 from runtime.shared_pico import PicoSnapshot
+import runtime.zmq_stream as zmq_stream
+from runtime.zmq_stream import ArrayPublisher, ArraySubscriber
 from teleop_upper_lower_locomani import TeleopUpperLowerLocomaniController
 
 
@@ -112,8 +113,9 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
 
     def test_d435i_preprocess_matches_policy_shape_and_normalization(self):
         processor = RealDepthProcessor()
-        processed, stats = processor.process(
-            np.full((360, 640), 1.0, dtype=np.float32)
+        processed, stats = processor.process_raw(
+            np.full((360, 640), 1000, dtype=np.uint16),
+            depth_scale=0.001,
         )
         self.assertEqual(processed.shape, (1, 36, 64))
         self.assertEqual(processed.dtype, np.float32)
@@ -127,6 +129,50 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
         processed, stats = processor.process(raw)
         self.assertGreater(stats["invalid_fraction"], 0.2)
         self.assertTrue(np.any(processed == -1.0))
+
+    def test_zmq_array_protocol_preserves_raw_uint16_depth(self):
+        class SendSocket:
+            def __init__(self):
+                self.parts = None
+
+            def send_multipart(self, parts, **_kwargs):
+                self.parts = [
+                    bytes(parts[0]),
+                    bytes(parts[1]),
+                    bytes(parts[2]),
+                ]
+
+        raw = np.arange(12, dtype=np.uint16).reshape(3, 4)
+        send_socket = SendSocket()
+        publisher = object.__new__(ArrayPublisher)
+        publisher.topic = b"depth"
+        publisher.dtype = np.dtype(np.uint16)
+        publisher.socket = send_socket
+        self.assertTrue(
+            publisher.send(raw, seq=7, sim_time=1.25)
+        )
+
+        class ReceiveSocket:
+            def __init__(self, parts):
+                self.parts = parts
+
+            def recv_multipart(self, **_kwargs):
+                if self.parts is None:
+                    raise zmq_stream.zmq.Again()
+                parts, self.parts = self.parts, None
+                return [
+                    parts[0],
+                    parts[1],
+                    SimpleNamespace(buffer=memoryview(parts[2])),
+                ]
+
+        subscriber = object.__new__(ArraySubscriber)
+        subscriber.topic = b"depth"
+        subscriber.socket = ReceiveSocket(send_socket.parts)
+        subscriber._latest = None
+        packet = subscriber.read_latest()
+        self.assertEqual(packet.values.dtype, np.uint16)
+        np.testing.assert_array_equal(packet.values, raw)
 
     def test_stairs_forces_forward_only_but_allows_neutral_stop(self):
         builder = PicoDualReferenceBuilder(
@@ -185,18 +231,21 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
 
     def test_remote_depth_freshness_uses_server_receive_clock(self):
         controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.target = "real"
         controller.depth_timeout_s = 0.25
         controller.max_invalid_fraction = 0.6
+        controller.depth_processor = RealDepthProcessor()
+        controller.raw_depth_shape = (360, 640)
         now = time.monotonic()
         packet = SimpleNamespace(
             recv_time=now - 0.02,
-            values=np.full((1, 36, 64), 0.5, dtype=np.float32),
+            values=np.full((360, 640), 1000, dtype=np.uint16),
             metadata={
                 # A remote monotonic timestamp has an unrelated epoch and must
                 # not participate in the policy server's freshness decision.
                 "capture_monotonic": now - 1_000_000.0,
-                "invalid_fraction": 0.0,
-                "invalid_value": -1.0,
+                "protocol": "d435i-raw-z16-v1",
+                "depth_scale": 0.001,
             },
         )
         controller.depth_sub = SimpleNamespace(read_latest=lambda: packet)
@@ -204,14 +253,21 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
 
     def test_remote_depth_rejects_stale_or_future_receive_timestamp(self):
         controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.target = "real"
         controller.depth_timeout_s = 0.25
         controller.max_invalid_fraction = 0.6
+        controller.depth_processor = RealDepthProcessor()
+        controller.raw_depth_shape = (360, 640)
         now = time.monotonic()
-        values = np.full((1, 36, 64), 0.5, dtype=np.float32)
+        values = np.full((360, 640), 1000, dtype=np.uint16)
         stale = SimpleNamespace(
             recv_time=now - 1.0,
             values=values,
-            metadata={"capture_monotonic": now, "invalid_fraction": 0.0},
+            metadata={
+                "capture_monotonic": now,
+                "protocol": "d435i-raw-z16-v1",
+                "depth_scale": 0.001,
+            },
         )
         controller.depth_sub = SimpleNamespace(read_latest=lambda: stale)
         self.assertIsNone(controller._depth())
@@ -219,52 +275,14 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
         future = SimpleNamespace(
             recv_time=now + 1.0,
             values=values,
-            metadata={"capture_monotonic": now, "invalid_fraction": 0.0},
+            metadata={
+                "capture_monotonic": now,
+                "protocol": "d435i-raw-z16-v1",
+                "depth_scale": 0.001,
+            },
         )
         controller.depth_sub = SimpleNamespace(read_latest=lambda: future)
         self.assertIsNone(controller._depth())
-
-    def test_worker_metadata_enforces_profile_serial_and_fov(self):
-        source = object.__new__(D435iSource)
-        source.width = 640
-        source.height = 360
-        source.fps = 30
-        source.serial_number = "1234"
-        source.expected_fov = (89.04, 57.9)
-        source.fov_tolerance_deg = 6.0
-        source.profile = None
-        source.depth_scale = 0.001
-        source.fov_deg = None
-        source._worker_device_serial = None
-        source._worker_device_name = None
-        metadata = {
-            "protocol_version": 1,
-            "device_name": "Intel RealSense D435I",
-            "serial_number": "1234",
-            "depth_scale": 0.001,
-            "width": 640,
-            "height": 360,
-            "fps": 30,
-            "fov_x_deg": 88.0,
-            "fov_y_deg": 58.0,
-        }
-        source._apply_worker_metadata(metadata)
-        self.assertEqual(source.device_serial, "1234")
-        self.assertEqual(source.fov_deg, (88.0, 58.0))
-        with self.assertRaisesRegex(
-            RuntimeError, "视场角与训练配置差异过大"
-        ):
-            source._apply_worker_metadata(
-                {**metadata, "fov_x_deg": 120.0}
-            )
-        with self.assertRaisesRegex(RuntimeError, "unexpected device"):
-            source._apply_worker_metadata(
-                {**metadata, "serial_number": "5678"}
-            )
-        with self.assertRaisesRegex(RuntimeError, "Expected.*D435i"):
-            source._apply_worker_metadata(
-                {**metadata, "device_name": "Intel RealSense D455"}
-            )
 
     def test_copied_dual_onnx_pair_runs_with_exact_contract(self):
         controller_names = yaml.safe_load(
@@ -319,48 +337,21 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
         self.assertEqual(hardware["mount_body"], "pelvis")
         self.assertAlmostEqual(float(hardware["pitch_down_deg"]), 60.0)
 
-    def test_distributed_profiles_preserve_policy_contract_and_split_hosts(self):
+    def test_real_profiles_keep_safe_local_defaults(self):
         config_dir = SIM2REAL_ROOT / "config/g1"
-        local_controller = yaml.safe_load(
+        controller = yaml.safe_load(
             (config_dir / "controller.yaml").read_text()
         )
-        distributed_controller = yaml.safe_load(
-            (config_dir / "controller-distributed.yaml").read_text()
-        )
-        for key, value in local_controller.items():
-            if key != "udp":
-                self.assertEqual(distributed_controller[key], value)
-        self.assertEqual(
-            distributed_controller["udp"]["state_bind_host"], "10.42.0.1"
-        )
-        self.assertEqual(
-            distributed_controller["udp"]["cmd_host"], "10.42.0.2"
-        )
-
-        local_task = yaml.safe_load(
+        self.assertEqual(controller["udp"]["state_bind_host"], "0.0.0.0")
+        self.assertEqual(controller["udp"]["cmd_host"], "127.0.0.1")
+        task = yaml.safe_load(
             (
                 config_dir
                 / "teleop-upper-lower-locomani-real.yaml"
             ).read_text()
         )
-        distributed_task = yaml.safe_load(
-            (
-                config_dir
-                / "teleop-upper-lower-locomani-real-distributed.yaml"
-            ).read_text()
-        )
-        for key, value in local_task.items():
-            if key != "camera_process":
-                self.assertEqual(distributed_task[key], value)
-        for key, value in local_task["camera_process"].items():
-            if key not in ("depth_bind", "depth_connect"):
-                self.assertEqual(
-                    distributed_task["camera_process"][key], value
-                )
-        self.assertEqual(
-            distributed_task["camera_process"]["depth_connect"],
-            "tcp://10.42.0.2:28811",
-        )
+        self.assertEqual(task["target"], "real")
+        self.assertEqual(task["camera_process"]["source"], "d435i")
 
         retarget = yaml.safe_load(
             (config_dir / "retarget/teleop-server.yaml").read_text()
@@ -370,25 +361,13 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
                 retarget["server"][field].startswith("tcp://127.0.0.1:")
             )
 
-        bridge_config_dir = SIM2REAL_ROOT.parent / "g1_sim2real/config"
-        local_bridge = yaml.safe_load(
+        bridge = yaml.safe_load(
             (
-                bridge_config_dir
+                SIM2REAL_ROOT.parent
+                / "g1_sim2real/config"
                 / "g1_bridge_teleop_upper_lower_locomani.yaml"
             ).read_text()
         )
-        bridge = yaml.safe_load(
-            (
-                bridge_config_dir
-                / "g1_bridge_teleop_upper_lower_locomani_distributed.yaml"
-            ).read_text()
-        )
-        for key, value in local_bridge.items():
-            if key != "udp":
-                self.assertEqual(bridge[key], value)
-        self.assertEqual(bridge["udp"]["state_host"], "10.42.0.1")
-        self.assertEqual(bridge["udp"]["cmd_bind_host"], "10.42.0.2")
-        self.assertEqual(bridge["udp"]["cmd_allowed_host"], "10.42.0.1")
         self.assertTrue(bridge["safety"]["startup_damping"])
         self.assertEqual(bridge["safety"]["damping_publish_hz"], 50.0)
 

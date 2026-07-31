@@ -41,7 +41,8 @@ camera_process:
     mount_position_m: [0.12546158, 0.0197, -0.05952004]
     pitch_down_deg: 60.0
   preprocess:
-    # Exact MJLab policy-space contract: raw 36x64, normalize by 2 m,
+    # Server/policy-process side only. Exact MJLab policy-space contract:
+    # raw 36x64, normalize by 2 m,
     # crop [top=10,left=10,right=10], resize back to 36x64.
     min_distance_m: 0.05
     normalization_max_distance_m: 2.0

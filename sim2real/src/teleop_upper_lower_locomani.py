@@ -18,6 +18,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from deploy import Controller, get_config
 from paths import controller_config_path
+from runtime.depth_pipeline import RealDepthProcessor
 from runtime.dual_locomani import ControlCommand, DualLocomaniRuntime
 from runtime.shared_pico import PicoFrameStore
 from runtime.zmq_stream import ArraySubscriber
@@ -73,6 +74,26 @@ class TeleopUpperLowerLocomaniController(Controller):
         self.max_invalid_fraction = float(
             camera_cfg.get("max_invalid_fraction", 0.6)
         )
+        self.depth_processor = None
+        self.raw_depth_shape = None
+        if self.target == "real":
+            preprocess_cfg = camera_cfg.get("preprocess")
+            hardware_cfg = camera_cfg.get("hardware")
+            if not isinstance(preprocess_cfg, dict):
+                raise ValueError(
+                    "real camera_process.preprocess must be a mapping"
+                )
+            if not isinstance(hardware_cfg, dict):
+                raise ValueError(
+                    "real camera_process.hardware must be a mapping"
+                )
+            self.depth_processor = RealDepthProcessor.from_config(
+                preprocess_cfg
+            )
+            self.raw_depth_shape = (
+                int(hardware_cfg.get("height", 360)),
+                int(hardware_cfg.get("width", 640)),
+            )
         switch_cfg = task_config.get("switch", {})
         self.switch_button = str(switch_cfg.get("button", "right_key_two"))
         self.neutral_hold_s = float(switch_cfg.get("neutral_hold_s", 0.25))
@@ -166,19 +187,44 @@ class TeleopUpperLowerLocomaniController(Controller):
         age = time.monotonic() - packet.recv_time
         if age < -0.1 or age > self.depth_timeout_s:
             return None
-        if packet.values.shape != (1, 36, 64):
-            raise ValueError(
-                f"Depth stream shape {packet.values.shape} != (1, 36, 64)"
+        if self.target == "real":
+            if packet.metadata.get("protocol") != "d435i-raw-z16-v1":
+                raise ValueError(
+                    "Real depth stream must use protocol d435i-raw-z16-v1"
+                )
+            raw = np.asarray(packet.values)
+            if raw.dtype != np.uint16:
+                raise ValueError(
+                    f"Raw depth stream dtype {raw.dtype} != uint16"
+                )
+            if raw.shape != self.raw_depth_shape:
+                raise ValueError(
+                    f"Raw depth stream shape {raw.shape} "
+                    f"!= {self.raw_depth_shape}"
+                )
+            depth, stats = self.depth_processor.process_raw(
+                raw,
+                depth_scale=float(packet.metadata["depth_scale"]),
             )
-        depth = np.asarray(packet.values, dtype=np.float32)
+            invalid_value = self.depth_processor.invalid_value
+            invalid_fraction = stats["invalid_fraction"]
+        else:
+            if packet.values.shape != (1, 36, 64):
+                raise ValueError(
+                    "Depth stream shape "
+                    f"{packet.values.shape} != (1, 36, 64)"
+                )
+            depth = np.asarray(packet.values, dtype=np.float32)
+            invalid_value = float(
+                packet.metadata.get("invalid_value", -1.0)
+            )
+            invalid_fraction = float(
+                packet.metadata.get(
+                    "invalid_fraction", np.mean(depth == invalid_value)
+                )
+            )
         if not np.all(np.isfinite(depth)):
             raise FloatingPointError("Depth stream contains NaN/Inf")
-        invalid_value = float(packet.metadata.get("invalid_value", -1.0))
-        invalid_fraction = float(
-            packet.metadata.get(
-                "invalid_fraction", np.mean(depth == invalid_value)
-            )
-        )
         if invalid_fraction > self.max_invalid_fraction:
             return None
         return depth
@@ -465,17 +511,17 @@ def main(argv=None) -> None:
     parser.add_argument(
         "--state-bind-host",
         default=None,
-        help="Override controller udp.state_bind_host for distributed deployment",
+        help="Override controller udp.state_bind_host",
     )
     parser.add_argument(
         "--cmd-host",
         default=None,
-        help="Override controller udp.cmd_host for distributed deployment",
+        help="Override controller udp.cmd_host",
     )
     parser.add_argument(
         "--depth-connect",
         default=None,
-        help="Override camera_process.depth_connect for distributed deployment",
+        help="Override the remote camera ZMQ endpoint",
     )
     parser.add_argument("--target", choices=("sim", "real"), default="sim")
     parser.add_argument(

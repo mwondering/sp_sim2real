@@ -19,11 +19,22 @@ def _require_zmq() -> None:
 
 
 class ArrayPublisher:
-    """Non-blocking latest-value PUB socket for one float32 array."""
+    """Non-blocking latest-value PUB socket for one fixed array dtype."""
 
-    def __init__(self, bind: str, *, topic: str) -> None:
+    def __init__(
+        self,
+        bind: str,
+        *,
+        topic: str,
+        dtype: np.dtype | type = np.float32,
+    ) -> None:
         _require_zmq()
         self.topic = str(topic).encode("utf-8")
+        self.dtype = np.dtype(dtype)
+        if self.dtype not in (np.dtype(np.float32), np.dtype(np.uint16)):
+            raise ValueError(
+                f"ArrayPublisher dtype must be float32 or uint16, got {self.dtype}"
+            )
         self.socket = zmq.Context.instance().socket(zmq.PUB)
         self.socket.setsockopt(zmq.LINGER, 0)
         self.socket.setsockopt(zmq.SNDHWM, 2)
@@ -37,13 +48,13 @@ class ArrayPublisher:
         sim_time: float,
         metadata: Mapping[str, object] | None = None,
     ) -> bool:
-        array = np.ascontiguousarray(values, dtype=np.float32)
+        array = np.ascontiguousarray(values, dtype=self.dtype)
         header = {
             "seq": int(seq),
             "sim_time": float(sim_time),
             "wall_time": time.time(),
             "shape": list(array.shape),
-            "dtype": "float32",
+            "dtype": array.dtype.name,
         }
         if metadata:
             header.update(dict(metadata))
@@ -99,8 +110,16 @@ class ArraySubscriber:
             try:
                 header = json.loads(bytes(parts[1]))
                 shape = tuple(int(v) for v in header["shape"])
+                if not shape or any(v <= 0 for v in shape):
+                    raise ValueError(f"Invalid array shape: {shape}")
+                dtype = np.dtype(str(header["dtype"]))
+                if dtype not in (
+                    np.dtype(np.float32),
+                    np.dtype(np.uint16),
+                ):
+                    raise ValueError(f"Unsupported array dtype: {dtype}")
                 values = (
-                    np.frombuffer(parts[2].buffer, dtype=np.float32)
+                    np.frombuffer(parts[2].buffer, dtype=dtype)
                     .reshape(shape)
                     .copy()
                 )

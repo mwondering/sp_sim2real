@@ -8,21 +8,40 @@ import time
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 SRC_ROOT = Path(__file__).resolve().parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from runtime.depth_pipeline import RealDepthProcessor
 from runtime.zmq_stream import ArraySubscriber
 
 
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(
-        description="View the (1,36,64) policy depth stream"
+        description="Process and view the D435i raw Z16 depth stream"
     )
     parser.add_argument("--connect", default="tcp://127.0.0.1:28811")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=SRC_ROOT.parent
+        / "config/g1/teleop-upper-lower-locomani-real.yaml",
+    )
     parser.add_argument("--timeout-s", type=float, default=0.5)
     args = parser.parse_args(argv)
+    with args.config.expanduser().resolve().open(
+        "r", encoding="utf-8"
+    ) as file:
+        config = yaml.safe_load(file)
+    camera_cfg = config["camera_process"]
+    processor = RealDepthProcessor.from_config(camera_cfg["preprocess"])
+    hardware_cfg = camera_cfg["hardware"]
+    raw_shape = (
+        int(hardware_cfg.get("height", 360)),
+        int(hardware_cfg.get("width", 640)),
+    )
     try:
         import cv2
     except (ImportError, ModuleNotFoundError) as exc:
@@ -33,8 +52,10 @@ def main(argv=None) -> None:
     subscriber = ArraySubscriber(args.connect, topic="depth")
     last_seq = None
     last_frame_time = time.monotonic()
+    last_report = last_frame_time
     print(
-        f"[DepthViewer] depth<-{args.connect}; q/Esc=quit, "
+        f"[DepthViewer] raw depth<-{args.connect}; processing on this host; "
+        "q/Esc=quit, "
         "near=red, far=blue, invalid=black"
     )
     try:
@@ -46,11 +67,20 @@ def main(argv=None) -> None:
                     last_frame_time = time.monotonic()
                 time.sleep(0.005)
                 continue
-            depth = np.asarray(packet.values, dtype=np.float32)
-            if depth.shape != (1, 36, 64):
+            raw = np.asarray(packet.values)
+            if packet.metadata.get("protocol") != "d435i-raw-z16-v1":
                 raise ValueError(
-                    f"Depth stream shape {depth.shape} != (1,36,64)"
+                    "Depth stream is not d435i-raw-z16-v1"
                 )
+            if raw.dtype != np.uint16 or raw.shape != raw_shape:
+                raise ValueError(
+                    f"Raw depth {raw.dtype} {raw.shape} "
+                    f"!= uint16 {raw_shape}"
+                )
+            depth, stats = processor.process_raw(
+                raw,
+                depth_scale=float(packet.metadata["depth_scale"]),
+            )
             image = depth[0]
             display = (255.0 * (1.0 - np.clip(image, 0.0, 1.0))).astype(
                 np.uint8
@@ -70,6 +100,15 @@ def main(argv=None) -> None:
                 break
             last_seq = packet.seq
             last_frame_time = time.monotonic()
+            if last_frame_time - last_report >= 1.0:
+                print(
+                    "[DepthViewer] "
+                    f"seq={packet.seq} "
+                    f"invalid={stats['invalid_fraction']:.1%} "
+                    f"range=[{stats['normalized_min']:.3f},"
+                    f"{stats['normalized_max']:.3f}]"
+                )
+                last_report = last_frame_time
     finally:
         subscriber.close()
         cv2.destroyAllWindows()
