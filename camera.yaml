@@ -1,0 +1,15 @@
+target: "real"
+
+camera_process:
+  source: "d435i"
+  depth_bind: "tcp://*:28811"
+  hardware:
+    width: 640
+    height: 360
+    fps: 30
+    serial_number: ""
+    worker_python: ""
+    frame_timeout_s: 0.5
+    expected_fov_x_deg: 89.04
+    expected_fov_y_deg: 57.9
+    fov_tolerance_deg: 6.0
