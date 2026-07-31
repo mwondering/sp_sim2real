@@ -3,27 +3,36 @@
 本分支只包含运行在 G1 机载计算机上的 D435i 深度采集与 ZMQ 发送代码，不包含策略、
 G1 bridge、ONNX、MuJoCo、PICO 或 XRoboToolkit 依赖。
 
-## 安装
+## 从头配置统一环境
 
 ```bash
-git clone --branch g1-camera-stream --single-branch <仓库地址> g1-camera-stream
-cd g1-camera-stream
+git clone --branch g1-camera-stream --single-branch \
+  https://github.com/mwondering/sp_sim2real.git \
+  /home/unitree/g1-camera-stream
+cd /home/unitree/g1-camera-stream
 
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="${HOME}/.local/bin:${PATH}"
+
+rm -rf .venv
+uv python install 3.12
+uv venv --python 3.12 .venv
+
+uv pip install \
+  --python .venv/bin/python \
+  --index-url https://pypi.org/simple \
+  -r requirements.txt
 ```
 
-如果当前平台可通过 pip 安装 RealSense Python：
+这里明确使用 Python 3.12，因为官方提供 Linux aarch64 对应的 `pyrealsense2`，而
+Python 3.13 没有对应的 aarch64 安装包。
+
+验证统一环境：
 
 ```bash
-.venv/bin/python -m pip install pyrealsense2
 .venv/bin/python -c \
-  'import numpy; import pyrealsense2 as rs; print(rs.__file__, rs.pipeline)'
+  'import sys, numpy, yaml, zmq; import pyrealsense2 as rs; print(sys.version); print(rs.__file__); print(rs.pipeline)'
 ```
-
-如果机载系统已有另一个能够导入 `numpy` 和 `pyrealsense2` 的 Python，不需要在
-`.venv` 中安装 `pyrealsense2`，启动时通过 `--worker-python` 指定该解释器。
 
 ## 本机启动
 
@@ -33,12 +42,11 @@ python3 -m venv .venv
 .venv/bin/python depth_camera_sender.py
 ```
 
-指定相机或 RealSense worker：
+多相机时指定 D435i 序列号：
 
 ```bash
 .venv/bin/python depth_camera_sender.py \
-  --serial-number <D435i序列号> \
-  --worker-python /absolute/path/to/realsense/python
+  --serial-number <D435i序列号>
 ```
 
 进程发送 `640×360@30 Hz` 的原始 Z16 深度帧，ZMQ topic 为 `depth`。策略服务器应连接：
@@ -57,14 +65,6 @@ export G1_CAMERA_ROOT=/home/unitree/g1-camera-stream
 
 ssh -t "${ROBOT_SSH}" \
   "cd '${G1_CAMERA_ROOT}' && exec .venv/bin/python depth_camera_sender.py"
-```
-
-如果使用 worker：
-
-```bash
-ssh -t "${ROBOT_SSH}" \
-  "cd '${G1_CAMERA_ROOT}' && exec .venv/bin/python depth_camera_sender.py \
-   --worker-python /absolute/path/to/realsense/python"
 ```
 
 `Ctrl+C` 会经 SSH 终端传给相机进程并正常关闭 RealSense pipeline。正式使用前应确认
