@@ -24,6 +24,10 @@ from runtime.shared_pico import PicoFrameStore
 from runtime.zmq_stream import ArraySubscriber
 
 
+ANSI_BOLD_RED = "\033[1;31m"
+ANSI_RESET = "\033[0m"
+
+
 def _resolve(config_path: Path, value: str) -> Path:
     path = Path(value).expanduser()
     return path.resolve() if path.is_absolute() else (config_path.parent / path).resolve()
@@ -50,8 +54,11 @@ class TeleopUpperLowerLocomaniController(Controller):
         self.task_config = task_config
         self.target = str(task_config.get("target", "sim"))
         self.mode = self.MODE_WHOLE_BODY
-        self._previous_mode_button = False
-        self._last_camera_warning = 0.0
+        self._previous_dual_button = False
+        self._previous_whole_body_button = False
+        self._whole_body_pico_timeout_active = False
+        self._dual_input_timeout_active = False
+        self._imu_limit_active = False
         self._neutral_since = time.monotonic()
         self._safe_hold_q = self.cmd_q.copy()
         self._pico_session_started = False
@@ -95,7 +102,16 @@ class TeleopUpperLowerLocomaniController(Controller):
                 int(hardware_cfg.get("width", 640)),
             )
         switch_cfg = task_config.get("switch", {})
-        self.switch_button = str(switch_cfg.get("button", "right_key_two"))
+        self.dual_button = str(
+            switch_cfg.get("dual_button", "right_key_two")
+        ).strip()
+        self.whole_body_button = str(
+            switch_cfg.get("whole_body_button", "left_key_two")
+        ).strip()
+        if not self.dual_button or not self.whole_body_button:
+            raise ValueError("switch button names must not be empty")
+        if self.dual_button == self.whole_body_button:
+            raise ValueError("dual and whole-body switch buttons must differ")
         self.neutral_hold_s = float(switch_cfg.get("neutral_hold_s", 0.25))
         self.stick_deadband = float(switch_cfg.get("stick_deadband", 0.1))
         safety_cfg = task_config.get("safety", {})
@@ -112,6 +128,15 @@ class TeleopUpperLowerLocomaniController(Controller):
             safety_cfg.get("max_abs_gyro_rad_s", 4.0)
         )
         self.max_tilt_rad = float(safety_cfg.get("max_tilt_rad", 0.7))
+        self.safe_hold_on_whole_body_pico_timeout = bool(
+            safety_cfg.get("safe_hold_on_whole_body_pico_timeout", True)
+        )
+        self.safe_hold_on_dual_input_timeout = bool(
+            safety_cfg.get("safe_hold_on_dual_input_timeout", True)
+        )
+        self.safe_hold_on_imu_limit = bool(
+            safety_cfg.get("safe_hold_on_imu_limit", True)
+        )
         pico_stop_cfg = task_config.get("pico_software_stop", {})
         self.pico_stop_enabled = bool(pico_stop_cfg.get("enabled", True))
         self.pico_stop_button = str(
@@ -223,8 +248,6 @@ class TeleopUpperLowerLocomaniController(Controller):
                     "invalid_fraction", np.mean(depth == invalid_value)
                 )
             )
-        if not np.all(np.isfinite(depth)):
-            raise FloatingPointError("Depth stream contains NaN/Inf")
         if invalid_fraction > self.max_invalid_fraction:
             return None
         return depth
@@ -274,7 +297,7 @@ class TeleopUpperLowerLocomaniController(Controller):
         tilt = float(np.arccos(np.clip(-gravity[2], -1.0, 1.0)))
         return gyro_ok and tilt <= self.max_tilt_rad
 
-    def _handle_mode_button(
+    def _handle_mode_buttons(
         self,
         snapshot,
         *,
@@ -283,10 +306,24 @@ class TeleopUpperLowerLocomaniController(Controller):
         neutral_ready: bool,
         stable: bool,
     ) -> None:
-        pressed = bool(snapshot.buttons.get(self.switch_button, False))
-        rising = pressed and not self._previous_mode_button
-        self._previous_mode_button = pressed
-        if not rising:
+        dual_pressed = bool(snapshot.buttons.get(self.dual_button, False))
+        whole_body_pressed = bool(
+            snapshot.buttons.get(self.whole_body_button, False)
+        )
+        dual_rising = dual_pressed and not self._previous_dual_button
+        whole_body_rising = (
+            whole_body_pressed and not self._previous_whole_body_button
+        )
+        self._previous_dual_button = dual_pressed
+        self._previous_whole_body_button = whole_body_pressed
+
+        if dual_rising and whole_body_rising:
+            print(
+                "[TeleopLocomani] switch ignored: dual and whole-body "
+                "buttons rose in the same control cycle"
+            )
+            return
+        if not dual_rising and not whole_body_rising:
             return
         if not neutral_ready or not stable:
             print(
@@ -294,10 +331,21 @@ class TeleopUpperLowerLocomaniController(Controller):
                 "and robot upright for the configured hold time"
             )
             return
-        if self.mode == self.MODE_DUAL:
+
+        if whole_body_rising:
+            if self.mode == self.MODE_SAFE_HOLD and not pico_ready:
+                print(
+                    "[TeleopLocomani] left Y ignored: wait for active PICO pose"
+                )
+                return
             self._set_mode(self.MODE_WHOLE_BODY)
-        elif self.mode == self.MODE_SAFE_HOLD and pico_ready:
-            self._set_mode(self.MODE_WHOLE_BODY)
+            return
+
+        if self.mode == self.MODE_SAFE_HOLD:
+            print(
+                "[TeleopLocomani] right B ignored in safe-hold: press left Y "
+                "to recover whole-body mode first"
+            )
         elif dual_ready:
             self._set_mode(self.MODE_DUAL)
         else:
@@ -312,7 +360,13 @@ class TeleopUpperLowerLocomaniController(Controller):
         self._safe_hold_q = np.asarray(self.qj, dtype=np.float32).copy()
         self.mode = self.MODE_SAFE_HOLD
         self._blend_step = self.blend_steps
-        print(f"[TeleopLocomani] SAFE HOLD: {reason}")
+        print(
+            f"{ANSI_BOLD_RED}[TeleopLocomani] SAFE HOLD "
+            f"(policy process remains alive): {reason}; restore inputs, "
+            "keep all PICO sticks neutral for 0.3s, then press PICO left Y "
+            f"to recover whole-body mode{ANSI_RESET}",
+            flush=True,
+        )
 
     def _safe_hold_command(self) -> ControlCommand:
         return ControlCommand(
@@ -324,13 +378,69 @@ class TeleopUpperLowerLocomaniController(Controller):
             ),
         )
 
+    def _handle_whole_body_pico_freshness(self, *, pico_ready: bool) -> None:
+        if pico_ready:
+            self._whole_body_pico_timeout_active = False
+            return
+        if not self._pico_session_started:
+            return
+        if self.safe_hold_on_whole_body_pico_timeout:
+            self._enter_safe_hold(
+                f"{self.depth_timeout_s:.3f}s input timeout: "
+                "PICO pose/control stream is stale"
+            )
+            return
+        if self._whole_body_pico_timeout_active:
+            return
+        self._whole_body_pico_timeout_active = True
+        print(
+            f"{ANSI_BOLD_RED}[TeleopLocomani] WARNING: "
+            f"PICO pose/control exceeded {self.depth_timeout_s:.3f}s in "
+            "whole-body mode; safe-hold is disabled for this condition, "
+            f"continuing whole-body policy{ANSI_RESET}",
+            flush=True,
+        )
+
+    def _handle_dual_input_freshness(self, *, dual_ready: bool) -> None:
+        if dual_ready:
+            self._dual_input_timeout_active = False
+            return
+        if self.safe_hold_on_dual_input_timeout:
+            self._enter_safe_hold(
+                f"{self.depth_timeout_s:.3f}s input timeout: "
+                "PICO pose/control or depth stream is stale"
+            )
+            return
+        if self._dual_input_timeout_active:
+            return
+        self._dual_input_timeout_active = True
+        print(
+            f"{ANSI_BOLD_RED}[TeleopLocomani] WARNING: "
+            f"PICO pose/control or depth stream exceeded "
+            f"{self.depth_timeout_s:.3f}s in dual mode; safe-hold is "
+            "disabled for this condition, using whole-body commands until "
+            f"dual inputs recover{ANSI_RESET}",
+            flush=True,
+        )
+
+    def _handle_imu_stability(self, *, stable: bool) -> None:
+        if stable:
+            self._imu_limit_active = False
+            return
+        if self.safe_hold_on_imu_limit:
+            self._enter_safe_hold("IMU tilt/angular velocity safety limit")
+            return
+        if self._imu_limit_active:
+            return
+        self._imu_limit_active = True
+        print(
+            f"{ANSI_BOLD_RED}[TeleopLocomani] WARNING: "
+            "IMU tilt/angular velocity safety limit exceeded; safe-hold is "
+            f"disabled for this condition, continuing active policy{ANSI_RESET}",
+            flush=True,
+        )
+
     def _apply_command(self, command: ControlCommand) -> ControlCommand:
-        if not (
-            np.all(np.isfinite(command.q_des))
-            and np.all(np.isfinite(command.kp))
-            and np.all(np.isfinite(command.kd))
-        ):
-            raise FloatingPointError("Control command contains NaN/Inf")
         if self._blend_step < self.blend_steps:
             self._blend_step += 1
             alpha = self._blend_step / self.blend_steps
@@ -386,15 +496,16 @@ class TeleopUpperLowerLocomaniController(Controller):
         )
         self._blend_step = 0
         print(
-            "[TeleopLocomani] running: right A=start PICO, right B=switch policy, "
+            "[TeleopLocomani] running: right A=start PICO, right B=dual policy, "
+            "left Y=whole-body policy, "
             "left X=software stop (damping + task exit)"
         )
         while True:
             if not self.process_state(wait_next=True, timeout_s=1.0):
                 if self.state_timeout_is_fatal:
                     raise TimeoutError(
-                        "No bridge state for 1s; real task is stopping so the "
-                        "bridge watchdog can enter damping"
+                        "No bridge state for 1s; real task is stopping without "
+                        "sending an automatic damping command"
                     )
                 print("[TeleopLocomani] no bridge state for 1s")
                 continue
@@ -437,29 +548,21 @@ class TeleopUpperLowerLocomaniController(Controller):
 
             neutral_ready = self._update_neutral_hold(snapshot)
             stable = self._body_stable()
-            self._handle_mode_button(
+            self._handle_mode_buttons(
                 snapshot,
                 pico_ready=pico_ready,
                 dual_ready=dual_ready,
                 neutral_ready=neutral_ready,
                 stable=stable,
             )
-            if self.mode == self.MODE_DUAL and not dual_ready:
-                now = time.monotonic()
-                if now - self._last_camera_warning > 1.0:
-                    print(
-                        "[TeleopLocomani] dual input stale; entering safe hold"
-                    )
-                    self._last_camera_warning = now
-                self._enter_safe_hold("PICO pose/control or depth stream is stale")
-            elif (
-                self.mode != self.MODE_SAFE_HOLD
-                and self._pico_session_started
-                and not pico_ready
-            ):
-                self._enter_safe_hold("PICO pose/control stream is stale")
-            elif self.mode != self.MODE_SAFE_HOLD and not stable:
-                self._enter_safe_hold("IMU tilt/angular velocity safety limit")
+            if self.mode == self.MODE_DUAL:
+                self._handle_dual_input_freshness(dual_ready=dual_ready)
+            elif self.mode == self.MODE_WHOLE_BODY:
+                self._handle_whole_body_pico_freshness(
+                    pico_ready=pico_ready
+                )
+            if self.mode != self.MODE_SAFE_HOLD:
+                self._handle_imu_stability(stable=stable)
 
             if self.mode == self.MODE_SAFE_HOLD:
                 command = self._safe_hold_command()
@@ -588,11 +691,7 @@ def main(argv=None) -> None:
         traceback.print_exc()
     finally:
         if controller is not None:
-            try:
-                controller.set_damping_cmd()
-                controller.send_cmd()
-            finally:
-                controller.close_locomani()
+            controller.close_locomani()
 
 
 if __name__ == "__main__":

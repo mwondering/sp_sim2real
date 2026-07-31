@@ -7,7 +7,8 @@ upper_onnx: "ckpts/MJLab_Locomani/upper.onnx"
 kinematics_xml: "assets/g1_teleop_upper_lower_locomani.xml"
 
 switch:
-  button: "right_key_two"
+  dual_button: "right_key_two"       # PICO right B
+  whole_body_button: "left_key_two"  # PICO left Y
   blend_duration_s: 1.0
   # A policy switch is accepted only after all PICO sticks remain neutral.
   neutral_hold_s: 0.3
@@ -56,6 +57,12 @@ camera_process:
 
 safety:
   state_timeout_is_fatal: true
+  # Temporary diagnostic settings: these conditions print a red warning and
+  # keep the policy process running instead of entering safe-hold. If dual
+  # inputs are stale, whole-body commands are used until they recover.
+  safe_hold_on_whole_body_pico_timeout: false
+  safe_hold_on_dual_input_timeout: false
+  safe_hold_on_imu_limit: false
   safe_hold_kp_scale: 0.5
   safe_hold_min_kd: 2.0
   max_abs_gyro_rad_s: 4.0

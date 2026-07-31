@@ -9,7 +9,7 @@
 - D435i 独立进程以 `640x360@30 Hz` 采集并发布原始 Z16 深度；策略进程在接收端生成
   `(1,36,64)` 输入。
 - 策略/真机状态频率为 50 Hz；相机超时阈值为 0.25 秒。
-- 初始模式为全身遥操作；PICO 右手 B 在全身与上下肢分离模式间切换。
+- 初始模式为全身遥操作；PICO 右手 B 进入上下肢分离模式，左手 Y 返回全身模式，两个按键均为上升沿触发。
 - PICO 左手 X 是软件停止键：控制包有效时立即发送 damping 并结束高层任务。
 - 楼梯模式 `terrain-class=2` 只允许前进，不支持横移、倒退和原地旋转。高度摇杆不启用。
 
@@ -46,6 +46,54 @@ uv pip install \
   --python .venv/bin/python \
   --index-url https://pypi.org/simple \
   -r requirements.txt
+```
+
+G1 的 Ubuntu 20.04 系统使用 glibc 2.31，而 PyPI 当前提供的 Python 3.12/AArch64
+`pyrealsense2` wheel 会要求 `GLIBC_2.38`。不要单独替换 `/lib/aarch64-linux-gnu`
+下的 glibc；应在 G1 上从源码构建只安装到上述虚拟环境的绑定：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential cmake git pkg-config \
+  libssl-dev libusb-1.0-0-dev libudev-dev
+
+test -d /home/unitree/librealsense-2.57.7 || \
+  git clone --depth 1 --branch v2.57.7 \
+    https://github.com/realsenseai/librealsense.git \
+    /home/unitree/librealsense-2.57.7
+
+cmake \
+  -S /home/unitree/librealsense-2.57.7 \
+  -B /home/unitree/librealsense-2.57.7/build-g1-py312 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_PYTHON_BINDINGS=ON \
+  -DPYTHON_EXECUTABLE=/home/unitree/g1-camera-stream/.venv/bin/python \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DFORCE_RSUSB_BACKEND=ON \
+  -DBUILD_EXAMPLES=OFF \
+  -DBUILD_GRAPHICAL_EXAMPLES=OFF \
+  -DBUILD_TOOLS=OFF \
+  -DBUILD_UNIT_TESTS=OFF \
+  -DBUILD_WITH_CUDA=OFF \
+  -DBUILD_WITH_DDS=OFF
+
+cmake --build /home/unitree/librealsense-2.57.7/build-g1-py312 \
+  --target pyrealsense2 --parallel "$(nproc)"
+
+uv pip uninstall --python .venv/bin/python pyrealsense2
+cp -L \
+  /home/unitree/librealsense-2.57.7/build-g1-py312/Release/pyrealsense2.cpython-312-aarch64-linux-gnu.so \
+  .venv/lib/python3.12/site-packages/
+```
+
+若以后再次执行 `uv pip install -r requirements.txt`，PyPI wheel 会覆盖源码版本，需要重新执行
+上面最后两条命令。验证 ABI、Python 导入和相机枚举：
+
+```bash
+getconf GNU_LIBC_VERSION
+.venv/bin/python -c \
+  'import pyrealsense2 as rs; print(rs.__file__, rs.pipeline); print([(d.get_info(rs.camera_info.name), d.get_info(rs.camera_info.serial_number)) for d in rs.context().query_devices()])'
 ```
 
 该分支只包含 D435i 读取和 ZMQ 发送端，不包含策略、bridge、ONNX、MuJoCo 或 PICO。
@@ -125,7 +173,7 @@ uv run python teleop/serve_xrobot_teleop.py --robot g1
 `tcp://*:28811`，只需知道 SSH 地址和分支绝对路径：
 
 ```bash
-export ROBOT_IP="<G1机载计算机的192.168.123.x地址>"
+export ROBOT_IP="192.168.123.164"
 export ROBOT_SSH="unitree@${ROBOT_IP}"
 export G1_CAMERA_ROOT=/home/unitree/g1-camera-stream
 
@@ -138,7 +186,7 @@ ssh -t "${ROBOT_SSH}" \
 
 ```bash
 cd /home/lenovo/workspace/UNICTL/motion_tracking_sim2real_self/sim2real
-export ROBOT_IP="<G1机载计算机的192.168.123.x地址>"
+export ROBOT_IP="192.168.123.164"
 uv run src/view_depth_stream.py \
   --config config/g1/teleop-upper-lower-locomani-real.yaml \
   --connect "tcp://${ROBOT_IP}:28811"
@@ -172,7 +220,7 @@ ssh -t "${ROBOT_SSH}" \
 
 ```bash
 cd /home/lenovo/workspace/UNICTL/motion_tracking_sim2real_self/g1_sim2real
-G1_NET=enp3s0 \
+G1_NET=enp4s0 \
 G1_BRIDGE_CONFIG=config/g1_bridge_teleop_upper_lower_locomani.yaml \
 bash scripts/run_bridge.sh
 ```
@@ -186,7 +234,9 @@ G1_BRIDGE_CONFIG=config/g1_bridge_teleop_upper_lower_locomani.yaml \
 bash scripts/run_bridge.sh
 ```
 
-必须看到 `task safety: watchdog=0.12s`。此 watchdog 只在收到第一条有效高层命令后生效；命令中断、NaN/Inf 或越界时会锁定 damping，恢复必须重启 bridge。
+必须看到 `command_timeout_monitor=0.12s timeout_action=warn-only`。命令中断超过
+0.12 秒时只打印红色警告，不发送 damping。bridge 不再校验 `q_des/qd_des/kp/kd`
+的有限性、范围或相邻命令跳变，也不再有 safety latch；格式异常的命令只记录并丢弃。
 
 ### 终端 5：双策略任务
 
@@ -194,11 +244,11 @@ HEFT：
 
 ```bash
 cd /home/lenovo/workspace/UNICTL/motion_tracking_sim2real_self/sim2real
-export ROBOT_IP="<G1机载计算机的192.168.123.x地址>"
+export ROBOT_IP="192.168.123.164"
 uv run src/teleop_upper_lower_locomani.py \
   --target real \
   --whole-body-policy heft \
-  --terrain-class 2 \
+  --terrain-class 1 \
   --depth-connect "tcp://${ROBOT_IP}:28811"
 ```
 
@@ -227,7 +277,7 @@ uv run src/teleop_upper_lower_locomani.py \
 7. 所有 PICO 摇杆回中并保持至少 0.3 秒，机器人直立稳定后，按 PICO 右手 `B`，进入上下肢分离模式。
 8. 上楼梯只使用左摇杆 Y 缓慢给前进命令；松开即为零速度命令。
 
-再次切换前仍须让所有摇杆回中并保持 0.3 秒，再按 PICO 右手 B。切换会在 1.0 秒内混合关节目标和增益。
+返回全身模式前仍须让所有摇杆回中并保持 0.3 秒，再按 PICO 左手 `Y`。右手 `B` 和左手 `Y` 都只在按下瞬间触发；长按不会重复切换，同一控制周期同时按下会忽略。模式切换会在 1.0 秒内混合关节目标和增益。
 
 ## 6. 按键
 
@@ -237,7 +287,8 @@ uv run src/teleop_upper_lower_locomani.py \
 | G1 遥控器 | `A` | 从默认姿态进入策略 |
 | G1 遥控器 | `select/stop` | 结束高层任务 |
 | PICO 右手 | `A` | 启动或重新对齐 PICO |
-| PICO 右手 | `B` | 切换两种策略模式 |
+| PICO 右手 | `B` | 进入上下肢分离（dual）模式，上升沿触发 |
+| PICO 左手 | `Y` | 返回全身（whole-body）模式，上升沿触发 |
 | PICO 左手 | `X` | 软件停止：立即发送 damping 并结束高层任务 |
 | PICO 左摇杆 Y | 前后速度 | 楼梯模式只接受向前 |
 
@@ -249,27 +300,23 @@ G1 实体遥控器停止键。
 
 ## 7. 失效行为
 
-- 双策略模式下相机或 PICO 超过 0.25 秒未更新：进入 `safe-hold`，不会自动切换策略。
-- IMU 倾斜或角速度超过新任务配置阈值：进入 `safe-hold`。
-- `safe-hold` 时若输入恢复：全部摇杆回中并保持 0.3 秒，按 PICO 右手 B，只恢复到全身模式。
+- 全身模式 PICO 超时、双策略模式相机/PICO 超时、IMU 超限：终端打印红色警告，
+  不进入 `safe-hold`。双策略输入断流时临时发送全身策略指令，输入恢复后继续双策略。
 - 收到 0.25 秒内的新鲜 PICO 左手 X 输入：立即发送 damping 并结束高层任务。
-- 高层进程退出或 UDP 命令超过 0.12 秒中断：C++ bridge 锁定 damping；必须先确认原因，再重启 bridge。
+- UDP 命令超过 0.12 秒中断：C++ bridge 只打印红色警告，不发送 damping。
+- 高层进程正常退出或捕获到异常：关闭高层资源，不再自动发送 damping。
+- NaN/Inf、数值越界和目标跳变不会触发 bridge 拒绝或 damping；格式异常的命令只记录并丢弃。
 - 任意异常或机器人失稳：优先按 G1 遥控器停止键；PICO 左手 X 只作为辅助软件停止。
 
 ## 8. 正常停止
 
 1. 停止移动，全部摇杆回中。
-2. 按 G1 遥控器 `select/stop`；也可以按 PICO 左手 X 请求软件停止。两者都会让任务退出并发送 damping。
-3. 确认机器人进入阻尼/安全支撑状态。
-4. `Ctrl+C` 停止任务、bridge、相机、PICO 服务。
+2. 如需高层显式发送 damping，按 PICO 左手 X；G1 遥控器 `select/stop` 只结束高层任务，不再自动发送 damping。
+3. `Ctrl+C` 停止 bridge 时，bridge 自身的关闭路径仍会发送一次 damping。
+4. 停止相机和 PICO 服务。
 
-bridge 的 watchdog 锁定后日志包含：
-
-```text
-[G1Bridge] SAFETY LATCH: ...; publishing damping and requiring bridge restart
-```
-
-这是预期保护，不能在当前 bridge 进程中解锁。
+bridge 不再产生 `SAFETY LATCH`。命令超时只打印红色
+`WARNING: valid UDP command timeout`，格式异常的命令打印后丢弃。
 
 ## 9. 快速排障
 
@@ -292,16 +339,16 @@ ssh "${ROBOT_SSH}" \
 - 查看终端 `invalid=`；持续超过 60% 时任务不会进入上下肢分离模式；
 - 室外强光、反光/透明材料和过近物体会造成 D435i 无效深度。
 
-按 PICO B 无法切换：
+按 PICO B/Y 无法切换：
 
 - 先按 PICO A；
 - 确认相机进程持续发布；
 - 四个摇杆全部回中至少 0.3 秒；
 - 确认机器人没有明显倾斜或快速转动；
-- 松开 B 后重新按一次。
+- 进入 dual 使用右手 B，返回 whole-body 使用左手 Y；松开对应按键后重新按一次。
 
 任务提示 `No bridge state for 1s`：
 
-- 真机任务会主动退出，随后 bridge watchdog 进入 damping；
+- 真机任务会主动退出，但不再自动发送 damping；
 - 检查 `G1_NET`、DDS LowState 和 UDP 端口；
 - 排除原因后按完整顺序重启 bridge 与任务。

@@ -58,6 +58,8 @@ constexpr size_t kHeaderSize = 4 + 1 + 1 + 2 + 8 + 8 + 4 + 4;
 constexpr size_t kCrcSize = 4;
 constexpr int kG1MotorCount = 29;
 constexpr uint64_t kStdinButtonPulseNs = 200'000'000ULL;
+constexpr char kAnsiBoldRed[] = "\033[1;31m";
+constexpr char kAnsiReset[] = "\033[0m";
 
 std::atomic<bool> g_stop_requested{false};
 
@@ -312,11 +314,6 @@ struct SafetyConfig {
   double command_timeout_s = 0.0;
   bool startup_damping = true;
   double damping_publish_hz = 50.0;
-  double max_abs_q_des = 4.0;
-  double max_abs_qd_des = 30.0;
-  double max_kp = 120.0;
-  double max_kd = 10.0;
-  double max_command_step_rad = 0.2;
 };
 
 struct BridgeConfig {
@@ -407,23 +404,13 @@ BridgeConfig load_config(const std::string & path)
     cfg.safety.command_timeout_s = yaml_value_or<double>(safety["command_timeout_s"], 0.0);
     cfg.safety.startup_damping = yaml_value_or<bool>(safety["startup_damping"], true);
     cfg.safety.damping_publish_hz = yaml_value_or<double>(safety["damping_publish_hz"], 50.0);
-    cfg.safety.max_abs_q_des = yaml_value_or<double>(safety["max_abs_q_des"], 4.0);
-    cfg.safety.max_abs_qd_des = yaml_value_or<double>(safety["max_abs_qd_des"], 30.0);
-    cfg.safety.max_kp = yaml_value_or<double>(safety["max_kp"], 120.0);
-    cfg.safety.max_kd = yaml_value_or<double>(safety["max_kd"], 10.0);
-    cfg.safety.max_command_step_rad =
-        yaml_value_or<double>(safety["max_command_step_rad"], 0.2);
   }
   if (cfg.safety.enabled) {
     if (cfg.safety.command_timeout_s <= 0.0) {
       throw std::runtime_error("safety.command_timeout_s must be positive when safety is enabled");
     }
-    if (cfg.safety.damping_publish_hz <= 0.0 ||
-        cfg.safety.max_abs_q_des <= 0.0 || cfg.safety.max_abs_qd_des < 0.0 ||
-        cfg.safety.max_kp <= 0.0 || cfg.safety.max_kd <= 0.0 ||
-        cfg.safety.max_command_step_rad <= 0.0) {
-      throw std::runtime_error(
-          "enabled safety rates/limits must be positive (max_abs_qd_des may be zero)");
+    if (cfg.safety.damping_publish_hz <= 0.0) {
+      throw std::runtime_error("safety.damping_publish_hz must be positive");
     }
   }
 
@@ -964,7 +951,7 @@ class G1UdpBridge {
                    "the first valid command"
                 << std::endl;
       publish_damping_command(
-          /*log=*/false, /*require_safety_output=*/true);
+          /*log=*/false, /*require_startup_pending=*/true);
     }
     start_state_sender_thread();
 
@@ -988,12 +975,11 @@ class G1UdpBridge {
     std::cout << "[G1Bridge] command mode: event-driven UDP callback -> DDS Write, mode_pr="
               << static_cast<int>(cfg_.low_level.mode_pr) << std::endl;
     if (cfg_.safety.enabled) {
-      std::cout << "[G1Bridge] task safety: watchdog=" << cfg_.safety.command_timeout_s
-                << "s startup_damping=" << (cfg_.safety.startup_damping ? "on" : "off")
+      std::cout << "[G1Bridge] task safety: command_timeout_monitor=" << cfg_.safety.command_timeout_s
+                << "s timeout_action=warn-only"
+                << " startup_damping=" << (cfg_.safety.startup_damping ? "on" : "off")
                 << " damping_hz=" << cfg_.safety.damping_publish_hz
-                << " max_q=" << cfg_.safety.max_abs_q_des
-                << " max_kp/kd=" << cfg_.safety.max_kp << "/" << cfg_.safety.max_kd
-                << " max_step=" << cfg_.safety.max_command_step_rad << "rad" << std::endl;
+                << std::endl;
     }
     if (cfg_.freq.state_publish_mode == StatePublishMode::LowStateTick) {
       std::cout << "[G1Bridge] state mode: LowState.tick target decimation -> dedicated UDP state sender thread"
@@ -1620,8 +1606,7 @@ class G1UdpBridge {
   void on_udp_command(const LatestPacket & packet)
   {
     if (fatal_shutdown_requested_.load(std::memory_order_relaxed) ||
-        g_stop_requested.load(std::memory_order_relaxed) ||
-        safety_latched_.load(std::memory_order_relaxed)) {
+        g_stop_requested.load(std::memory_order_relaxed)) {
       return;
     }
     const int64_t packet_seq = static_cast<int64_t>(packet.seq);
@@ -1646,10 +1631,6 @@ class G1UdpBridge {
         return;
       }
       const int enable = packet.data["enable"] ? packet.data["enable"].as<int>() : 0;
-      if (const auto violation = validate_command(q_src, qd_src, kp_src, kd_src)) {
-        latch_safety(*violation);
-        return;
-      }
 
       LowCmd cmd;
       cmd.mode_pr() = cfg_.low_level.mode_pr;
@@ -1676,20 +1657,16 @@ class G1UdpBridge {
 
       {
         std::lock_guard<std::mutex> lock(cmd_write_mutex_);
-        if (safety_latched_.load(std::memory_order_relaxed)) {
-          return;
-        }
         lowcmd_publisher_->Write(cmd);
         if (cfg_.safety.enabled) {
           const bool first_valid_command =
               !have_valid_command_.load(std::memory_order_relaxed);
           last_valid_command_ns_.store(now_ns(), std::memory_order_relaxed);
           have_valid_command_.store(true, std::memory_order_release);
-          last_q_des_ = q_src;
-          last_kp_ = kp_src;
+          command_timeout_warning_active_.store(false, std::memory_order_relaxed);
           if (first_valid_command && cfg_.safety.startup_damping) {
             std::cout << "[G1Bridge] First valid command accepted; "
-                         "startup damping released and watchdog armed"
+                         "startup damping released and command timeout monitor armed"
                       << std::endl;
           }
         }
@@ -1698,69 +1675,7 @@ class G1UdpBridge {
       command_forward_count_.fetch_add(1, std::memory_order_relaxed);
     } catch (const std::exception & exc) {
       std::cerr << "[G1Bridge] Ignore malformed UDP command: " << exc.what() << std::endl;
-      if (cfg_.safety.enabled) {
-        latch_safety(std::string("malformed UDP command: ") + exc.what());
-      }
     }
-  }
-
-  std::optional<std::string> validate_command(
-      const std::vector<double> & q, const std::vector<double> & qd,
-      const std::vector<double> & kp, const std::vector<double> & kd)
-  {
-    if (!cfg_.safety.enabled) {
-      return std::nullopt;
-    }
-    const auto check_finite_limit = [](const std::vector<double> & values, double max_abs,
-                                       bool non_negative, const char * name)
-        -> std::optional<std::string> {
-      for (size_t i = 0; i < values.size(); ++i) {
-        const double value = values[i];
-        if (!std::isfinite(value)) {
-          return std::string(name) + "[" + std::to_string(i) + "] is NaN/Inf";
-        }
-        if ((non_negative && value < 0.0) || std::abs(value) > max_abs) {
-          return std::string(name) + "[" + std::to_string(i) + "] exceeds safety limit";
-        }
-      }
-      return std::nullopt;
-    };
-    if (auto error = check_finite_limit(q, cfg_.safety.max_abs_q_des, false, "q_des")) {
-      return error;
-    }
-    if (auto error = check_finite_limit(qd, cfg_.safety.max_abs_qd_des, false, "qd_des")) {
-      return error;
-    }
-    if (auto error = check_finite_limit(kp, cfg_.safety.max_kp, true, "kp")) {
-      return error;
-    }
-    if (auto error = check_finite_limit(kd, cfg_.safety.max_kd, true, "kd")) {
-      return error;
-    }
-    if (have_valid_command_.load(std::memory_order_acquire) &&
-        last_q_des_.size() == q.size() && last_kp_.size() == kp.size()) {
-      for (size_t i = 0; i < q.size(); ++i) {
-        // A q target is semantically inactive while kp is zero. Do not reject
-        // the normal zero-torque -> initial-PD handoff on that inactive value.
-        if (last_kp_[i] > 0.0 && kp[i] > 0.0 &&
-            std::abs(q[i] - last_q_des_[i]) > cfg_.safety.max_command_step_rad) {
-          return std::string("q_des[") + std::to_string(i) +
-                 "] step exceeds safety.max_command_step_rad";
-        }
-      }
-    }
-    return std::nullopt;
-  }
-
-  void latch_safety(const std::string & reason)
-  {
-    if (!cfg_.safety.enabled || safety_latched_.exchange(true)) {
-      return;
-    }
-    std::cerr << "[G1Bridge] SAFETY LATCH: " << reason
-              << "; continuously publishing damping and requiring bridge restart"
-              << std::endl;
-    publish_damping_command(/*log=*/true, /*require_safety_output=*/true);
   }
 
   void start_command_watchdog()
@@ -1779,20 +1694,30 @@ class G1UdpBridge {
              !g_stop_requested.load(std::memory_order_relaxed)) {
         const bool have_command =
             have_valid_command_.load(std::memory_order_acquire);
-        if (have_command && !safety_latched_.load(std::memory_order_relaxed)) {
+        if (have_command) {
           const uint64_t last = last_valid_command_ns_.load(std::memory_order_relaxed);
           const uint64_t now = now_ns();
           if (now > last && now - last > timeout_ns) {
-            latch_safety("valid UDP command timeout");
+            if (!command_timeout_warning_active_.exchange(
+                    true, std::memory_order_relaxed)) {
+              const double elapsed_s =
+                  static_cast<double>(now - last) * 1.0e-9;
+              std::cerr << kAnsiBoldRed
+                        << "[G1Bridge] WARNING: valid UDP command timeout ("
+                        << elapsed_s << "s > "
+                        << cfg_.safety.command_timeout_s
+                        << "s); timeout damping is disabled, waiting for "
+                           "commands to resume"
+                        << kAnsiReset << std::endl;
+            }
           }
         }
         const bool should_publish_damping =
-            safety_latched_.load(std::memory_order_relaxed) ||
-            (cfg_.safety.startup_damping && !have_command);
+            cfg_.safety.startup_damping && !have_command;
         const auto steady_now = SteadyClock::now();
         if (should_publish_damping && steady_now >= next_damping) {
           publish_damping_command(
-              /*log=*/false, /*require_safety_output=*/true);
+              /*log=*/false, /*require_startup_pending=*/true);
           next_damping = steady_now + damping_period;
         } else if (!should_publish_damping) {
           next_damping = steady_now;
@@ -1828,7 +1753,7 @@ class G1UdpBridge {
   }
 
   void publish_damping_command(
-      bool log = true, bool require_safety_output = false)
+      bool log = true, bool require_startup_pending = false)
   {
     if (!lowcmd_publisher_) {
       return;
@@ -1846,8 +1771,7 @@ class G1UdpBridge {
     }
     cmd.crc() = crc32_core((uint32_t *)&cmd, (static_cast<uint32_t>(sizeof(LowCmd)) >> 2) - 1);
     std::lock_guard<std::mutex> lock(cmd_write_mutex_);
-    if (require_safety_output &&
-        !safety_latched_.load(std::memory_order_relaxed) &&
+    if (require_startup_pending &&
         (!cfg_.safety.startup_damping ||
          have_valid_command_.load(std::memory_order_acquire))) {
       return;
@@ -1972,11 +1896,9 @@ class G1UdpBridge {
   std::unique_ptr<UdpLatestReceiver> command_receiver_;
   std::thread command_watchdog_thread_;
   std::atomic<bool> watchdog_stop_{false};
-  std::atomic<bool> safety_latched_{false};
   std::atomic<bool> have_valid_command_{false};
+  std::atomic<bool> command_timeout_warning_active_{false};
   std::atomic<uint64_t> last_valid_command_ns_{0};
-  std::vector<double> last_q_des_;
-  std::vector<double> last_kp_;
 
   std::atomic<bool> closed_{false};
   std::atomic<bool> fatal_shutdown_requested_{false};

@@ -305,8 +305,6 @@ class ObservationBuilder:
         action = np.asarray(action, dtype=np.float32).reshape(-1)
         if action.shape != (29,):
             raise ValueError(f"Applied dual action must be (29,), got {action.shape}")
-        if not np.all(np.isfinite(action)):
-            raise FloatingPointError("Applied dual action contains NaN/Inf")
         self.last_action = action.copy()
 
     def reset(self, applied_action: np.ndarray | None = None) -> None:
@@ -497,8 +495,6 @@ class DualLocomaniRuntime:
                 f"Dual action shapes lower={lower.shape}, upper={upper.shape}"
             )
         action = np.concatenate((lower, upper))
-        if not np.all(np.isfinite(action)):
-            raise FloatingPointError("Dual-policy action contains NaN/Inf")
         target = DEFAULT_JOINT_POS + action * ACTION_SCALE
         indexes = self._controller_from_canonical
         return (

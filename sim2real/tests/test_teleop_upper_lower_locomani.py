@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from dataclasses import replace
+import io
 import sys
 import time
 import unittest
@@ -229,6 +231,164 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
             controller._pico_software_stop_requested(released, now=now)
         )
 
+    def test_separate_mode_buttons_use_rising_edges_without_toggling(self):
+        controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.mode = controller.MODE_WHOLE_BODY
+        controller.dual_button = "right_key_two"
+        controller.whole_body_button = "left_key_two"
+        controller._previous_dual_button = False
+        controller._previous_whole_body_button = False
+        controller.cmd_q = DEFAULT_JOINT_POS.copy()
+        controller.cmd_kp = np.ones(29, dtype=np.float32)
+        controller.cmd_kd = np.ones(29, dtype=np.float32)
+        controller._blend_step = 7
+
+        right_b = self._snapshot(buttons={"right_key_two": True})
+        controller._handle_mode_buttons(
+            right_b,
+            pico_ready=True,
+            dual_ready=True,
+            neutral_ready=True,
+            stable=True,
+        )
+        self.assertEqual(controller.mode, controller.MODE_DUAL)
+        self.assertEqual(controller._blend_step, 0)
+
+        controller._blend_step = 7
+        controller._handle_mode_buttons(
+            right_b,
+            pico_ready=True,
+            dual_ready=True,
+            neutral_ready=True,
+            stable=True,
+        )
+        self.assertEqual(controller.mode, controller.MODE_DUAL)
+        self.assertEqual(controller._blend_step, 7)
+
+        controller._handle_mode_buttons(
+            self._snapshot(buttons={}),
+            pico_ready=True,
+            dual_ready=True,
+            neutral_ready=True,
+            stable=True,
+        )
+        left_y = self._snapshot(buttons={"left_key_two": True})
+        controller._handle_mode_buttons(
+            left_y,
+            pico_ready=True,
+            dual_ready=True,
+            neutral_ready=True,
+            stable=True,
+        )
+        self.assertEqual(controller.mode, controller.MODE_WHOLE_BODY)
+        self.assertEqual(controller._blend_step, 0)
+
+    def test_simultaneous_mode_button_rises_are_ignored(self):
+        controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.mode = controller.MODE_WHOLE_BODY
+        controller.dual_button = "right_key_two"
+        controller.whole_body_button = "left_key_two"
+        controller._previous_dual_button = False
+        controller._previous_whole_body_button = False
+        output = io.StringIO()
+        with redirect_stdout(output):
+            controller._handle_mode_buttons(
+                self._snapshot(
+                    buttons={"right_key_two": True, "left_key_two": True}
+                ),
+                pico_ready=True,
+                dual_ready=True,
+                neutral_ready=True,
+                stable=True,
+            )
+        self.assertEqual(controller.mode, controller.MODE_WHOLE_BODY)
+        self.assertIn("same control cycle", output.getvalue())
+
+    def test_safe_hold_keeps_controller_alive_and_prints_red_alert(self):
+        controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.mode = controller.MODE_WHOLE_BODY
+        controller.qj = DEFAULT_JOINT_POS.copy()
+        controller.blend_steps = 50
+        output = io.StringIO()
+        with redirect_stdout(output):
+            controller._enter_safe_hold(
+                "0.250s input timeout: PICO pose/control stream is stale"
+            )
+
+        self.assertEqual(controller.mode, controller.MODE_SAFE_HOLD)
+        np.testing.assert_allclose(controller._safe_hold_q, controller.qj)
+        self.assertEqual(controller._blend_step, controller.blend_steps)
+        message = output.getvalue()
+        self.assertIn("\033[1;31m", message)
+        self.assertIn("\033[0m", message)
+        self.assertIn("policy process remains alive", message)
+        self.assertIn("0.250s input timeout", message)
+
+    def test_disabled_whole_body_pico_timeout_warns_without_safe_hold(self):
+        controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.mode = controller.MODE_WHOLE_BODY
+        controller._pico_session_started = True
+        controller._whole_body_pico_timeout_active = False
+        controller.safe_hold_on_whole_body_pico_timeout = False
+        controller.depth_timeout_s = 0.25
+        output = io.StringIO()
+        with redirect_stdout(output):
+            controller._handle_whole_body_pico_freshness(pico_ready=False)
+
+        self.assertEqual(controller.mode, controller.MODE_WHOLE_BODY)
+        self.assertTrue(controller._whole_body_pico_timeout_active)
+        message = output.getvalue()
+        self.assertIn("\033[1;31m", message)
+        self.assertIn("safe-hold is disabled", message)
+        self.assertIn("continuing whole-body policy", message)
+
+    def test_enabled_whole_body_pico_timeout_enters_safe_hold(self):
+        controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.mode = controller.MODE_WHOLE_BODY
+        controller._pico_session_started = True
+        controller._whole_body_pico_timeout_active = False
+        controller.safe_hold_on_whole_body_pico_timeout = True
+        controller.depth_timeout_s = 0.25
+        controller.qj = DEFAULT_JOINT_POS.copy()
+        controller.blend_steps = 50
+        with redirect_stdout(io.StringIO()):
+            controller._handle_whole_body_pico_freshness(pico_ready=False)
+
+        self.assertEqual(controller.mode, controller.MODE_SAFE_HOLD)
+
+    def test_disabled_dual_input_timeout_warns_without_safe_hold(self):
+        controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.mode = controller.MODE_DUAL
+        controller._dual_input_timeout_active = False
+        controller.safe_hold_on_dual_input_timeout = False
+        controller.depth_timeout_s = 0.25
+        output = io.StringIO()
+        with redirect_stdout(output):
+            controller._handle_dual_input_freshness(dual_ready=False)
+
+        self.assertEqual(controller.mode, controller.MODE_DUAL)
+        self.assertTrue(controller._dual_input_timeout_active)
+        message = output.getvalue()
+        self.assertIn("\033[1;31m", message)
+        self.assertIn("safe-hold is disabled", message)
+        self.assertIn("using whole-body commands", message)
+
+    def test_disabled_imu_limit_warns_without_safe_hold(self):
+        controller = object.__new__(TeleopUpperLowerLocomaniController)
+        controller.mode = controller.MODE_DUAL
+        controller._imu_limit_active = False
+        controller.safe_hold_on_imu_limit = False
+        output = io.StringIO()
+        with redirect_stdout(output):
+            controller._handle_imu_stability(stable=False)
+
+        self.assertEqual(controller.mode, controller.MODE_DUAL)
+        self.assertTrue(controller._imu_limit_active)
+        message = output.getvalue()
+        self.assertIn("\033[1;31m", message)
+        self.assertIn("safe-hold is disabled", message)
+        self.assertIn("continuing active policy", message)
+
     def test_remote_depth_freshness_uses_server_receive_clock(self):
         controller = object.__new__(TeleopUpperLowerLocomaniController)
         controller.target = "real"
@@ -333,6 +493,17 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
         self.assertEqual(
             config["pico_software_stop"]["button"], "left_key_one"
         )
+        self.assertEqual(config["switch"]["dual_button"], "right_key_two")
+        self.assertEqual(
+            config["switch"]["whole_body_button"], "left_key_two"
+        )
+        self.assertFalse(
+            config["safety"]["safe_hold_on_whole_body_pico_timeout"]
+        )
+        self.assertFalse(
+            config["safety"]["safe_hold_on_dual_input_timeout"]
+        )
+        self.assertFalse(config["safety"]["safe_hold_on_imu_limit"])
         hardware = config["camera_process"]["hardware"]
         self.assertEqual(hardware["mount_body"], "pelvis")
         self.assertAlmostEqual(float(hardware["pitch_down_deg"]), 60.0)
@@ -370,6 +541,12 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
         )
         self.assertTrue(bridge["safety"]["startup_damping"])
         self.assertEqual(bridge["safety"]["damping_publish_hz"], 50.0)
+        self.assertNotIn("latch_on_command_timeout", bridge["safety"])
+        self.assertNotIn("max_abs_q_des", bridge["safety"])
+        self.assertNotIn("max_command_step_rad", bridge["safety"])
+        self.assertNotIn("max_abs_qd_des", bridge["safety"])
+        self.assertNotIn("max_kp", bridge["safety"])
+        self.assertNotIn("max_kd", bridge["safety"])
 
     def test_spv5_2_task_option_resolves_inside_current_repository(self):
         config_path = SIM2REAL_ROOT / "config/g1/tracking_spv5_2.yaml"
