@@ -15,6 +15,8 @@
 
 本仓库不包含训练代码和数据集生成代码，也不包含 L7 实机底层桥接程序。
 
+Dual-Teacher 的完整启动顺序见 [Dual-Teacher sim2sim / sim2real 部署说明](dual-teacher-deployment_zh.md)。
+
 ## 目录结构
 
 ```text
