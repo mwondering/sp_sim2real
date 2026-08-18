@@ -182,7 +182,144 @@ class RealDepthProcessor:
         }
 
 
+class TAPTerrainDepthProcessor:
+    """Depth preprocessing used by the TAP—terrain training task.
+
+    The training camera is 36x64.  It crops the bottom half and center 32
+    columns, applies a reflected 3x3 Gaussian blur, clamps metric depth to
+    [0.1, 1.2] m, and divides by 1.2.  Invalid real-camera samples are replaced
+    by the far cutoff before the same pipeline is applied.
+    """
+
+    sensor_shape = (36, 64)
+    output_shape = (1, 18, 32)
+
+    def __init__(
+        self,
+        *,
+        min_depth: float = 0.1,
+        cutoff_distance: float = 1.2,
+        crop_top: int = 18,
+        crop_bottom: int = 0,
+        crop_left: int = 16,
+        crop_right: int = 16,
+        gaussian_blur_sigma: float = 1.0,
+        valid_threshold: float = 0.5,
+        edge_fill_left_columns: int = 24,
+    ) -> None:
+        self.min_depth = float(min_depth)
+        self.cutoff_distance = float(cutoff_distance)
+        self.crop = (
+            int(crop_top),
+            int(crop_bottom),
+            int(crop_left),
+            int(crop_right),
+        )
+        self.gaussian_blur_sigma = float(gaussian_blur_sigma)
+        self.valid_threshold = float(valid_threshold)
+        self.edge_fill_left_columns = int(edge_fill_left_columns)
+        if self.min_depth < 0.0:
+            raise ValueError("min_depth must be non-negative")
+        if self.cutoff_distance <= self.min_depth:
+            raise ValueError("cutoff_distance must be greater than min_depth")
+        if self.gaussian_blur_sigma <= 0.0:
+            raise ValueError("gaussian_blur_sigma must be positive")
+        if not 0.0 <= self.valid_threshold <= 1.0:
+            raise ValueError("valid_threshold must be in [0, 1]")
+        top, bottom, left, right = self.crop
+        if min(self.crop) < 0 or top + bottom >= 36 or left + right >= 64:
+            raise ValueError(f"Invalid TAP—terrain crop: {self.crop}")
+        cropped_shape = (36 - top - bottom, 64 - left - right)
+        if cropped_shape != self.output_shape[1:]:
+            raise ValueError(
+                f"TAP—terrain crop produces {cropped_shape}, expected "
+                f"{self.output_shape[1:]}"
+            )
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, object]) -> "TAPTerrainDepthProcessor":
+        contract = str(config.get("contract", "tap_terrain_v1"))
+        if contract != "tap_terrain_v1":
+            raise ValueError(
+                f"TAP—terrain depth contract must be 'tap_terrain_v1', got {contract!r}"
+            )
+        return cls(
+            min_depth=float(config.get("min_depth_m", 0.1)),
+            cutoff_distance=float(config.get("cutoff_distance_m", 1.2)),
+            crop_top=int(config.get("crop_top", 18)),
+            crop_bottom=int(config.get("crop_bottom", 0)),
+            crop_left=int(config.get("crop_left", 16)),
+            crop_right=int(config.get("crop_right", 16)),
+            gaussian_blur_sigma=float(config.get("gaussian_blur_sigma", 1.0)),
+            valid_threshold=float(config.get("valid_threshold", 0.5)),
+            edge_fill_left_columns=int(config.get("edge_fill_left_columns", 24)),
+        )
+
+    def _gaussian_blur(self, image: np.ndarray) -> np.ndarray:
+        coords = np.arange(-1, 2, dtype=np.float32)
+        kernel_1d = np.exp(
+            -(coords * coords) / (2.0 * self.gaussian_blur_sigma**2)
+        )
+        kernel_1d /= kernel_1d.sum()
+        kernel = np.outer(kernel_1d, kernel_1d).astype(np.float32)
+        padded = np.pad(image, ((1, 1), (1, 1)), mode="reflect")
+        windows = np.lib.stride_tricks.sliding_window_view(padded, (3, 3))
+        return np.einsum("ijkl,kl->ij", windows, kernel).astype(np.float32)
+
+    def process_raw(
+        self, depth_raw: np.ndarray, *, depth_scale: float
+    ) -> tuple[np.ndarray, dict[str, float]]:
+        raw = np.asarray(depth_raw)
+        if raw.dtype != np.uint16:
+            raise ValueError(f"Expected raw uint16 depth, got {raw.dtype}")
+        scale = float(depth_scale)
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ValueError(f"Invalid depth scale: {scale}")
+        return self.process(raw.astype(np.float32) * scale)
+
+    def process(
+        self, depth_m: np.ndarray
+    ) -> tuple[np.ndarray, dict[str, float]]:
+        depth = np.asarray(depth_m, dtype=np.float32)
+        if depth.ndim != 2 or min(depth.shape) <= 1:
+            raise ValueError(f"Expected metric depth [H,W], got {depth.shape}")
+
+        invalid = (~np.isfinite(depth)) | (depth <= 0.0)
+        depth, invalid = _fill_left_edge_invalid(
+            depth, invalid, self.edge_fill_left_columns
+        )
+        raw_invalid_fraction = float(np.mean(invalid))
+        safe = depth.copy()
+        safe[invalid] = self.cutoff_distance
+        valid = (~invalid).astype(np.float32)
+        safe = resize_bilinear_align_corners_false(safe, self.sensor_shape)
+        valid = resize_bilinear_align_corners_false(valid, self.sensor_shape)
+        resized_invalid = valid < self.valid_threshold
+        safe[resized_invalid] = self.cutoff_distance
+
+        top, bottom, left, right = self.crop
+        row_end = safe.shape[0] - bottom if bottom else safe.shape[0]
+        col_end = safe.shape[1] - right if right else safe.shape[1]
+        cropped = safe[top:row_end, left:col_end]
+        blurred = self._gaussian_blur(cropped)
+        output = (
+            np.clip(blurred, self.min_depth, self.cutoff_distance)
+            / self.cutoff_distance
+        )[None].astype(np.float32)
+        if output.shape != self.output_shape:
+            raise RuntimeError(
+                f"TAP—terrain depth is {output.shape}, expected {self.output_shape}"
+            )
+        return output, {
+            "raw_invalid_fraction": raw_invalid_fraction,
+            "invalid_fraction": float(np.mean(resized_invalid)),
+            "normalized_min": float(np.min(output)),
+            "normalized_max": float(np.max(output)),
+        }
+
+
 __all__ = [
     "RealDepthProcessor",
+    "TAPTerrainDepthProcessor",
     "resize_bilinear_align_corners_false",
 ]

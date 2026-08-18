@@ -91,6 +91,18 @@ class PolicyRunRecorder:
 
         state_seq = getattr(controller, "last_state_seq", None)
         state_receive_time_ns = getattr(controller, "last_state_receive_time_ns", None)
+        dof_size = int(np.asarray(controller.qj).size)
+        missing_motor_float = np.full(dof_size, np.nan, dtype=np.float32)
+        missing_motor_u32 = np.zeros(dof_size, dtype=np.uint32)
+
+        def motor_array(name: str, dtype, fallback: np.ndarray) -> np.ndarray:
+            value = np.asarray(getattr(controller, name, fallback), dtype=dtype)
+            if value.shape != (dof_size,):
+                raise ValueError(
+                    f"Controller {name} has shape {value.shape}, expected {(dof_size,)}"
+                )
+            return value.copy()
+
         self._frames.append(
             {
                 "wall_time_ns": np.int64(time.time_ns()),
@@ -107,6 +119,54 @@ class PolicyRunRecorder:
                 "joint_torque_latest": controller.tau_latest.astype(
                     np.float32, copy=True
                 ),
+                "motor_acceleration": motor_array(
+                    "motor_ddq", np.float32, missing_motor_float
+                ),
+                "motor_temperature_casing": motor_array(
+                    "motor_temperature_casing", np.float32, missing_motor_float
+                ),
+                "motor_temperature_winding": motor_array(
+                    "motor_temperature_winding", np.float32, missing_motor_float
+                ),
+                "motor_voltage": motor_array(
+                    "motor_voltage", np.float32, missing_motor_float
+                ),
+                "motor_mode": motor_array("motor_mode", np.uint32, missing_motor_u32),
+                "motor_sensor_0": motor_array(
+                    "motor_sensor_0", np.uint32, missing_motor_u32
+                ),
+                "motor_sensor_1": motor_array(
+                    "motor_sensor_1", np.uint32, missing_motor_u32
+                ),
+                "motor_state": motor_array("motor_state", np.uint32, missing_motor_u32),
+                "motor_reserve_0": motor_array(
+                    "motor_reserve_0", np.uint32, missing_motor_u32
+                ),
+                "motor_reserve_1": motor_array(
+                    "motor_reserve_1", np.uint32, missing_motor_u32
+                ),
+                "motor_reserve_2": motor_array(
+                    "motor_reserve_2", np.uint32, missing_motor_u32
+                ),
+                "motor_reserve_3": motor_array(
+                    "motor_reserve_3", np.uint32, missing_motor_u32
+                ),
+                "motor_diagnostic_flags": motor_array(
+                    "motor_diagnostic_flags", np.uint32, missing_motor_u32
+                ),
+                "motor_diagnostic_flag_schema": np.uint32(
+                    getattr(controller, "motor_diagnostic_flag_schema", 0)
+                ),
+                "diagnostic_warning_count": np.uint32(
+                    getattr(controller, "diagnostic_warning_count", 0)
+                ),
+                "diagnostic_critical_count": np.uint32(
+                    getattr(controller, "diagnostic_critical_count", 0)
+                ),
+                "diagnostic_imu_flags": np.uint32(
+                    getattr(controller, "diagnostic_imu_flags", 0)
+                ),
+                "mode_machine": np.int32(getattr(controller, "mode_machine", -1)),
                 "action_delta": np.asarray(action_delta, dtype=np.float32).copy(),
                 "cmd_q": controller.cmd_q.astype(np.float32, copy=True),
                 "cmd_qd": controller.cmd_qd.astype(np.float32, copy=True),

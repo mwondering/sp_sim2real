@@ -17,6 +17,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from runtime.depth_pipeline import (
+    TAPTerrainDepthProcessor,
     resize_bilinear_align_corners_false as _resize_bilinear_align_corners_false,
 )
 from runtime.zmq_stream import ArrayPublisher, ArraySubscriber
@@ -40,11 +41,13 @@ class DepthRayCamera:
         site_name: str = "depth_camera",
         add_noise: bool = False,
         seed: int = 0,
+        depth_processor: TAPTerrainDepthProcessor | None = None,
     ) -> None:
         self.model = model
         self.data = data
         self.add_noise = bool(add_noise)
         self.rng = np.random.default_rng(seed)
+        self.depth_processor = depth_processor
         self.site_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_SITE, site_name
         )
@@ -81,6 +84,10 @@ class DepthRayCamera:
         world_directions = np.ascontiguousarray(
             self.local_directions @ world_rotation.T, dtype=np.float64
         )
+        # mj_multiRay's cutoff also culls geoms by their model-frame location.
+        # A camera on a terrain lane far from the world origin can therefore
+        # miss the floor even when the ray intersection itself is nearby.
+        query_cutoff = self.max_distance + float(np.linalg.norm(origin))
         mujoco.mj_multiRay(
             self.model,
             self.data,
@@ -93,7 +100,7 @@ class DepthRayCamera:
             self.distances,
             None,
             len(world_directions),
-            self.max_distance,
+            query_cutoff,
         )
 
         close_hits = np.flatnonzero(
@@ -132,6 +139,10 @@ class DepthRayCamera:
         if self.add_noise:
             sigma = 0.005 + 0.01 * depth
             depth += self.rng.normal(0.0, sigma, size=depth.shape)
+        if self.depth_processor is not None:
+            if self.add_noise:
+                depth[self.rng.random(depth.shape) < 0.01] = 0.0
+            return self.depth_processor.process(depth)[0]
         depth = np.clip(depth, 0.0, 2.0) / 2.0
         if self.add_noise:
             depth[self.rng.random(depth.shape) < 0.01] = -1.0
@@ -150,9 +161,7 @@ def _load_camera_config(path: Path) -> dict:
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(
-        description="Independent depth process for teleop-upper-lower-locomani"
-    )
+    parser = argparse.ArgumentParser(description="Independent policy depth process")
     parser.add_argument(
         "--config",
         type=Path,
@@ -180,12 +189,17 @@ def main(argv=None) -> None:
         str(camera_cfg["sim_state_connect"]), topic="sim_state"
     )
     depth_pub = ArrayPublisher(str(camera_cfg["depth_bind"]), topic="depth")
+    preprocess_cfg = camera_cfg.get("preprocess")
+    depth_processor = None
+    if isinstance(preprocess_cfg, dict) and preprocess_cfg.get("contract") == "tap_terrain_v1":
+        depth_processor = TAPTerrainDepthProcessor.from_config(preprocess_cfg)
     camera = DepthRayCamera(
         model,
         data,
         site_name=str(camera_cfg.get("site_name", "depth_camera")),
         add_noise=bool(args.depth_noise),
         seed=int(camera_cfg.get("seed", 0)),
+        depth_processor=depth_processor,
     )
     if args.show_depth:
         print(
@@ -195,9 +209,15 @@ def main(argv=None) -> None:
     period = 1.0 / float(camera_cfg.get("update_hz", 30.0))
     last_capture = float("-inf")
     last_seq = -1
+    output_shape = (
+        depth_processor.output_shape
+        if depth_processor is not None
+        else (1, camera.output_height, camera.output_width)
+    )
     print(
         f"[DepthCamera] state<-{camera_cfg['sim_state_connect']} "
-        f"depth->{camera_cfg['depth_bind']} xml={xml_path}"
+        f"depth->{camera_cfg['depth_bind']} xml={xml_path} "
+        f"output_shape={output_shape}"
     )
     try:
         while True:

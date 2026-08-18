@@ -34,6 +34,14 @@ Keyboard2Button = {
 }
 BUTTON_KEYS = ("start", "stop", "A", "up", "down")
 STICK_KEYS = ("lx", "ly", "rx", "ry")
+KEYBOARD_MOTION_AXES = {
+    "w": ("ly", 1.0),
+    "s": ("ly", -1.0),
+    "a": ("lx", 1.0),
+    "d": ("lx", -1.0),
+    "q": ("rx", 1.0),
+    "e": ("rx", -1.0),
+}
 _MISSING = object()
 
 
@@ -72,6 +80,28 @@ def _normalize_default_pose_mode(value: str) -> str:
             f"got {value!r}"
         )
     return aliases[normalized]
+
+
+def _keyboard_motion_sticks(
+    pressed_keys,
+    *,
+    magnitude: float = 1.0,
+) -> dict[str, float]:
+    """Convert held WASD/QE keys to normalized virtual-stick axes."""
+    magnitude = float(magnitude)
+    if not 0.0 < magnitude <= 1.0:
+        raise ValueError("keyboard.motion_magnitude must be in (0, 1]")
+    sticks = {name: 0.0 for name in STICK_KEYS}
+    for key in pressed_keys:
+        binding = KEYBOARD_MOTION_AXES.get(str(key).lower())
+        if binding is None:
+            continue
+        axis, direction = binding
+        sticks[axis] += direction * magnitude
+    return {
+        name: float(np.clip(value, -1.0, 1.0))
+        for name, value in sticks.items()
+    }
 
 
 def _compute_pd_control(qpos, qvel, target, kp, kd, lower, upper) -> np.ndarray:
@@ -234,6 +264,56 @@ class Sim2Sim:
         self.max_external_force = float(_cfg_value(config, "max_external_force", "max_external_force", 30.0))
         print(f"{self.log_prefix} startup.default_pose_mode={self.default_pose_mode}")
 
+        keyboard_cfg = _cfg_value(config, "keyboard", "keyboard", {})
+        self.keyboard_motion_enabled = bool(
+            _cfg_value(
+                keyboard_cfg,
+                "motion_enabled",
+                "keyboard.motion_enabled",
+                False,
+            )
+        )
+        self.keyboard_motion_magnitude = float(
+            _cfg_value(
+                keyboard_cfg,
+                "motion_magnitude",
+                "keyboard.motion_magnitude",
+                1.0,
+            )
+        )
+        if not 0.0 < self.keyboard_motion_magnitude <= 1.0:
+            raise ValueError("keyboard.motion_magnitude must be in (0, 1]")
+        if self.keyboard_motion_enabled:
+            self.start_key = str(
+                _cfg_value(keyboard_cfg, "start_key", "keyboard.start_key", "r")
+            ).lower()
+            self.policy_key = str(
+                _cfg_value(keyboard_cfg, "policy_key", "keyboard.policy_key", "p")
+            ).lower()
+            self.stop_key = str(
+                _cfg_value(keyboard_cfg, "stop_key", "keyboard.stop_key", "x")
+            ).lower()
+            control_keys = (self.start_key, self.policy_key, self.stop_key)
+            if len(set(control_keys)) != len(control_keys):
+                raise ValueError("keyboard start/policy/stop keys must be distinct")
+            conflicts = sorted(set(control_keys) & set(KEYBOARD_MOTION_AXES))
+            if conflicts:
+                raise ValueError(
+                    "keyboard start/policy/stop keys conflict with WASD/QE motion keys: "
+                    f"{conflicts}"
+                )
+            self.keyboard_button_map = {
+                self.start_key: "start",
+                self.policy_key: "A",
+                self.stop_key: "stop",
+                "u": "up",
+            }
+        else:
+            self.start_key = "s"
+            self.policy_key = "a"
+            self.stop_key = "x"
+            self.keyboard_button_map = dict(Keyboard2Button)
+
         self.data.qpos[:7] = self.root_qpos_home
         self.data.qpos[7:] = self._policy_to_mujoco(self.home_q_policy)
         self.data.qvel[:] = 0.0
@@ -248,6 +328,7 @@ class Sim2Sim:
         self._default_target_stable_count = 0
         self._last_default_target_policy = self.home_q_policy.copy()
         self._buttons = {k: False for k in BUTTON_KEYS}
+        self._pressed_motion_keys: set[str] = set()
 
         self._cmd_lock = threading.Lock()
         self._button_lock = threading.Lock()
@@ -257,6 +338,14 @@ class Sim2Sim:
         self._policy_delay_sum_ms = 0.0
         self._policy_delay_min_ms = float("inf")
         self._policy_delay_max_ms = 0.0
+
+        if self.keyboard_motion_enabled:
+            print(
+                f"{self.log_prefix} keyboard: {self.start_key}=ready, "
+                f"{self.policy_key}=policy, {self.stop_key}=stop, "
+                "W/S=forward/backward, A/D=left/right, Q/E=turn left/right; "
+                "release motion keys to command zero"
+            )
 
         self.transport = UDPRobotLow(config.udp, on_command_packet=self.cmd_sub_handler)
         state_stream_cfg = _cfg_value(config, "sim_state_stream", "sim_state_stream", {})
@@ -420,7 +509,7 @@ class Sim2Sim:
         self._have_tracking_target = True
         print(
             f"{self.log_prefix} Default target is stable; grounded PD hold is active. "
-            "Press 'a' to release the temporary base stabilizer and enter policy"
+            f"Press '{self.policy_key}' to enter policy"
         )
 
     def _set_button(self, name: str, value: bool) -> None:
@@ -431,19 +520,34 @@ class Sim2Sim:
         with self._button_lock:
             return dict(self._buttons)
 
+    def _sticks_snapshot(self):
+        with self._button_lock:
+            if not self.keyboard_motion_enabled:
+                return {name: 0.0 for name in STICK_KEYS}
+            return _keyboard_motion_sticks(
+                self._pressed_motion_keys,
+                magnitude=self.keyboard_motion_magnitude,
+            )
+
     def on_press(self, key):
         print(f"Key pressed: {key}")
-        btn = Keyboard2Button.get(key, None)
-        if btn is None:
-            return
-        self._set_button(btn, True)
+        key = str(key).lower()
+        btn = self.keyboard_button_map.get(key)
+        if btn is not None:
+            self._set_button(btn, True)
+        if self.keyboard_motion_enabled and key in KEYBOARD_MOTION_AXES:
+            with self._button_lock:
+                self._pressed_motion_keys.add(key)
 
     def on_release(self, key):
-        btn = Keyboard2Button.get(key, None)
-        if btn is None:
-            return
-        time.sleep(0.1)
-        self._set_button(btn, False)
+        key = str(key).lower()
+        if self.keyboard_motion_enabled and key in KEYBOARD_MOTION_AXES:
+            with self._button_lock:
+                self._pressed_motion_keys.discard(key)
+        btn = self.keyboard_button_map.get(key)
+        if btn is not None:
+            time.sleep(0.1)
+            self._set_button(btn, False)
 
     def cmd_sub_handler(self, packet: LatestPacket):
         payload = packet.data
@@ -541,7 +645,7 @@ class Sim2Sim:
             tau=tau,
             tau_latest=tau_latest,
             buttons=self._buttons_snapshot(),
-            sticks={name: 0.0 for name in STICK_KEYS},
+            sticks=self._sticks_snapshot(),
         )
         if self._sim_state_publisher is not None:
             self._sim_state_publisher.send(
@@ -564,7 +668,7 @@ class Sim2Sim:
             self._publish_state()
             state_timer.sleep()
         print("Connected to high level")
-        print('Press "s" to move to default pose')
+        print(f'Press "{self.start_key}" to move to default pose')
         running_zero_cmd = True
         while self.is_alive and running_zero_cmd:
             buttons = self._buttons_snapshot()
@@ -577,12 +681,14 @@ class Sim2Sim:
         if use_sim2real_pd:
             print(
                 "Moving to default pose...\n"
-                "Wait for the grounded-PD-ready message, then press 'a' to begin control loop"
+                "Wait for the grounded-PD-ready message, then press "
+                f"'{self.policy_key}' to begin control loop"
             )
         else:
             print(
                 "Moving to default pose...\n"
-                "Press 'a' after the robot is in default pose to begin control loop"
+                f"Press '{self.policy_key}' after the robot is in default pose "
+                "to begin control loop"
             )
         timer = Timer(self.low_level_dt)
         while True:

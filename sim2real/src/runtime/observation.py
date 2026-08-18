@@ -359,11 +359,18 @@ class ComplianceFlagObs(BaseObs):
 
 
 class _ChronologicalHistory:
-    """MJLab-compatible history: oldest-to-newest with first-frame backfill."""
+    """Oldest-to-newest history with configurable first-frame initialization."""
 
-    def __init__(self, length: int, width: int):
+    def __init__(
+        self,
+        length: int,
+        width: int,
+        *,
+        backfill_first_frame: bool = True,
+    ):
         self.length = int(length)
         self.width = int(width)
+        self.backfill_first_frame = bool(backfill_first_frame)
         if self.length <= 0 or self.width <= 0:
             raise ValueError("History length and width must be positive")
         self.values = np.zeros((self.length, self.width), dtype=np.float32)
@@ -376,7 +383,10 @@ class _ChronologicalHistory:
     def append(self, value: np.ndarray) -> None:
         value = np.asarray(value, dtype=np.float32).reshape(self.width)
         if not self.initialized:
-            self.values[:] = value
+            if self.backfill_first_frame:
+                self.values[:] = value
+            else:
+                self.values[-1] = value
             self.initialized = True
             return
         self.values[:-1] = self.values[1:]
@@ -621,3 +631,154 @@ class SPV52ActorObservation(SPV51ActorObservation):
     """SPV5-2 uses the same 8199-D layout with latest-sample torque feedback."""
 
     PROFILE_NAME = "SPV5-2"
+
+
+class TAPTerrainActorObservation(BaseObs):
+    """Exact 7484-D input assembled for the TAP—terrain full policy.
+
+    The estimator history keeps the SPV5-2 term-major 50-frame layout.  The
+    decoder proprio prefix reuses the newest five frames of each term and the
+    current 195-D semantic key-body state, so the adapter does not duplicate
+    any estimator or policy network computation.
+    """
+
+    PROFILE_NAME = "TAP—terrain"
+    HISTORY_LENGTH = 50
+    POLICY_HISTORY_LENGTH = 5
+    KEY_BODY_DIM = 13 * (3 + 6 + 3 + 3)
+    PROPRIO_TERM_DIMS = (29, 29, 3, 3, 29, 29)
+    PROPRIO_WITHOUT_ESTIMATES_DIM = (
+        POLICY_HISTORY_LENGTH * sum(PROPRIO_TERM_DIMS) + KEY_BODY_DIM
+    )
+    ESTIMATOR_HISTORY_DIM = HISTORY_LENGTH * sum(PROPRIO_TERM_DIMS)
+    VELOCITY_COMMAND_DIM = 3
+    DEPTH_SHAPE = (1, 18, 32)
+    DEPTH_DIM = int(np.prod(DEPTH_SHAPE))
+    SIZE = (
+        PROPRIO_WITHOUT_ESTIMATES_DIM
+        + ESTIMATOR_HISTORY_DIM
+        + VELOCITY_COMMAND_DIM
+        + DEPTH_DIM
+    )
+
+    def __init__(self, policy):
+        self.policy = policy
+        self.ctrl = policy.controller
+        self.kinematics = RobotKinematics(
+            _resolve_kinematics_path(policy),
+            policy.obs_joint_names,
+        )
+        joint_count = len(policy.obs_joint_names)
+        if joint_count != 29:
+            raise ValueError(
+                f"{self.PROFILE_NAME} expects 29 observation joints, got {joint_count}"
+            )
+
+        # The TAP training environment zeroes the older 49 slots on reset and
+        # writes the current sample only into the newest slot.  Preserve that
+        # startup distribution instead of physically waiting for 50 live frames.
+        history_kwargs = {"backfill_first_frame": False}
+        self.joint_pos_history = _ChronologicalHistory(
+            self.HISTORY_LENGTH, joint_count, **history_kwargs
+        )
+        self.joint_vel_history = _ChronologicalHistory(
+            self.HISTORY_LENGTH, joint_count, **history_kwargs
+        )
+        self.gravity_history = _ChronologicalHistory(
+            self.HISTORY_LENGTH, 3, **history_kwargs
+        )
+        self.gyro_history = _ChronologicalHistory(
+            self.HISTORY_LENGTH, 3, **history_kwargs
+        )
+        self.action_history = _ChronologicalHistory(
+            self.HISTORY_LENGTH, joint_count, **history_kwargs
+        )
+        self.torque_history = _ChronologicalHistory(
+            self.HISTORY_LENGTH, joint_count, **history_kwargs
+        )
+        self._value = np.zeros(self.SIZE, dtype=np.float32)
+
+    @property
+    def size(self) -> int:
+        return self.SIZE
+
+    @property
+    def histories(self) -> tuple[_ChronologicalHistory, ...]:
+        return (
+            self.joint_pos_history,
+            self.joint_vel_history,
+            self.gravity_history,
+            self.gyro_history,
+            self.action_history,
+            self.torque_history,
+        )
+
+    def reset(self) -> None:
+        for history in self.histories:
+            history.reset()
+        self._value[:] = 0.0
+
+    def update(self) -> None:
+        joint_pos = self.policy.current_joint_pos_obs()
+        joint_vel = self.policy.current_joint_vel_obs()
+        gravity = _quat_apply_inv(
+            self.ctrl.quat,
+            np.asarray([0.0, 0.0, -1.0], dtype=np.float32),
+        ).astype(np.float32)
+        samples = (
+            joint_pos - self.policy.default_joint_pos_obs,
+            joint_vel,
+            gravity,
+            self.ctrl.gyro,
+            self.policy.last_action,
+            self.policy.current_joint_torque_obs(),
+        )
+        for history, sample in zip(self.histories, samples, strict=True):
+            history.append(sample)
+
+        latest_proprio = np.concatenate(
+            tuple(
+                history.values[-self.POLICY_HISTORY_LENGTH :].reshape(-1)
+                for history in self.histories
+            )
+        )
+        robot_key_body = self.kinematics.semantic_keypoint_state(
+            joint_pos,
+            joint_vel,
+            self.ctrl.gyro,
+        )
+        if latest_proprio.size + robot_key_body.size != self.PROPRIO_WITHOUT_ESTIMATES_DIM:
+            raise RuntimeError(
+                f"{self.PROFILE_NAME} proprio prefix has "
+                f"{latest_proprio.size + robot_key_body.size} values, expected "
+                f"{self.PROPRIO_WITHOUT_ESTIMATES_DIM}"
+            )
+
+        estimator_history = np.concatenate(
+            tuple(history.flat() for history in self.histories)
+        )
+        velocity_command = np.asarray(
+            self.policy.velocity_command, dtype=np.float32
+        ).reshape(self.VELOCITY_COMMAND_DIM)
+        depth_image = np.asarray(
+            self.policy.depth_image, dtype=np.float32
+        ).reshape(self.DEPTH_SHAPE)
+        self._value = np.concatenate(
+            (
+                latest_proprio,
+                robot_key_body,
+                estimator_history,
+                velocity_command,
+                depth_image.reshape(-1),
+            )
+        ).astype(np.float32)
+        if self._value.size != self.SIZE:
+            raise RuntimeError(
+                f"{self.PROFILE_NAME} observation has {self._value.size} values, "
+                f"expected {self.SIZE}"
+            )
+        if not np.isfinite(self._value).all():
+            raise ValueError(f"{self.PROFILE_NAME} observation contains non-finite values")
+
+    def compute(self) -> np.ndarray:
+        return self._value

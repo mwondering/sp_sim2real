@@ -345,6 +345,97 @@ class Policy:
 # =========================================
 # Policy Subclasses
 # =========================================
+class TAPTerrainPolicy(Policy):
+    """Thin runtime wrapper for the complete TAP—terrain ONNX graph."""
+
+    PROFILE_NAME = "tap_terrain"
+    INPUT_KEY = "spv5_2_terrain_observation"
+    INPUT_SIZE = 7484
+    DEPTH_SHAPE = (1, 18, 32)
+
+    def __init__(self, name: str, policy_cfg: DictToClass, controller):
+        self.actor_profile = (
+            str(getattr(policy_cfg, "actor_profile", self.PROFILE_NAME))
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
+        if self.actor_profile != self.PROFILE_NAME:
+            raise ValueError(
+                f"TAP—terrain requires actor_profile={self.PROFILE_NAME!r}, "
+                f"got {self.actor_profile!r}"
+            )
+        task_name = str(getattr(policy_cfg, "task_name", ""))
+        if task_name != "TAP—terrain":
+            raise ValueError(
+                f"TAP—terrain config has task_name={task_name!r}, expected 'TAP—terrain'"
+            )
+
+        if bool(getattr(policy_cfg, "use_policy_metadata", False)):
+            metadata = _load_policy_metadata(policy_cfg)
+            if "joint_names" not in metadata:
+                raise ValueError(
+                    "TAP—terrain requires joint_names in policy metadata or fallback"
+                )
+            self.obs_joint_names = list(metadata["joint_names"])
+        else:
+            self.obs_joint_names = list(
+                getattr(
+                    policy_cfg,
+                    "observation_joint_names",
+                    controller.config.policy_joint_names,
+                )
+            )
+
+        self.velocity_command = np.zeros(3, dtype=np.float32)
+        self.depth_image = np.zeros(self.DEPTH_SHAPE, dtype=np.float32)
+        super().__init__(name, policy_cfg, controller)
+
+    def _validate_policy_input_key(self):
+        if self.input_key != self.INPUT_KEY or self.onnx_input_name != self.INPUT_KEY:
+            raise ValueError(
+                f"TAP—terrain requires input {self.INPUT_KEY!r}; policy.json has "
+                f"{self.input_key!r} and ONNX has {self.onnx_input_name!r}"
+            )
+
+    def _build_obs_modules(self):
+        from runtime.observation import TAPTerrainActorObservation
+
+        self.obs_modules = [TAPTerrainActorObservation(self)]
+        self.num_obs = sum(module.size for module in self.obs_modules)
+        if self.num_obs != self.INPUT_SIZE:
+            raise RuntimeError(
+                f"TAP—terrain observation is {self.num_obs}D, expected {self.INPUT_SIZE}D"
+            )
+
+    def set_external_inputs(
+        self, velocity_command: np.ndarray, depth_image: np.ndarray
+    ) -> None:
+        velocity = np.asarray(velocity_command, dtype=np.float32).reshape(3)
+        depth = np.asarray(depth_image, dtype=np.float32).reshape(self.DEPTH_SHAPE)
+        if not np.isfinite(velocity).all():
+            raise ValueError("TAP—terrain velocity command contains non-finite values")
+        if not np.isfinite(depth).all():
+            raise ValueError("TAP—terrain depth image contains non-finite values")
+        self.velocity_command[:] = velocity
+        self.depth_image[:] = depth
+
+    def current_joint_pos_obs(self) -> np.ndarray:
+        return self.mapper_observation.map_state_to_from(self.controller.qj).astype(
+            np.float32
+        )
+
+    def current_joint_vel_obs(self) -> np.ndarray:
+        return self.mapper_observation.map_state_to_from(self.controller.dqj).astype(
+            np.float32
+        )
+
+    def current_joint_torque_obs(self) -> np.ndarray:
+        return self.mapper_observation.map_state_to_from(
+            self.controller.tau_latest
+        ).astype(np.float32)
+
+
 class TrackingPolicyRaw(Policy):
     @staticmethod
     def _parse_future_steps(policy_cfg: DictToClass):

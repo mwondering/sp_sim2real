@@ -407,4 +407,26 @@ After both terminals are running and the robot is ready:
 For UDP G1 sim2real, start `motion_select.py` in another terminal after `deploy.py` is running.
 For VR G1 sim2real, start `serve_xrobot_teleop.py` before pressing remote `A`.
 
+### Motor safety diagnostics
+
+The G1 bridge enables read-only motor diagnostics by default. It monitors the
+raw `motorstate` code, drive mode, casing/winding temperatures, voltage,
+position, velocity, estimated torque, and IMU angular velocity. Diagnostics
+only report and record conditions; they never alter commands or enter damping.
+
+The default hard temperature and velocity thresholds match the G1 runtime
+termination defaults in the vendored Unitree SDK: 85 C casing, 120 C winding,
+10 rad/s joint velocity, and 6 rad/s IMU angular velocity. Position and torque
+checks use the G1 limits represented by `sim2real/config/g1/assets/g1.xml`.
+Temperature/velocity thresholds, warning margins/ratios, and check switches are
+configurable under `diagnostics` in `g1_sim2real/config/g1_bridge.yaml`.
+
+Watch `[MotorDiag]` lines in the bridge terminal for per-joint details. The
+Python runtime also reports state changes. Unless `--no-record` is used, policy
+NPZ logs include the raw motor telemetry, diagnostic flags/counts, and
+`mode_machine` for post-run correlation. A nonzero raw `motorstate` is retained
+without guessing its meaning because this SDK snapshot does not include a
+complete G1 fault-code mapping, and `LowState` does not expose one definitive
+"entered damping because ..." field.
+
 **CAUTION**: Always test a motion in sim2sim before running it on hardware.

@@ -57,6 +57,24 @@ class PolicyObservationRecordingTests(unittest.TestCase):
             dqj=np.asarray([3.0, 4.0], dtype=np.float32),
             tau=np.asarray([5.0, 6.0], dtype=np.float32),
             tau_latest=np.asarray([7.0, 8.0], dtype=np.float32),
+            motor_ddq=np.asarray([0.5, 0.6], dtype=np.float32),
+            motor_temperature_casing=np.asarray([41.0, 42.0], dtype=np.float32),
+            motor_temperature_winding=np.asarray([51.0, 52.0], dtype=np.float32),
+            motor_voltage=np.asarray([47.8, 47.9], dtype=np.float32),
+            motor_mode=np.asarray([1, 1], dtype=np.uint32),
+            motor_sensor_0=np.asarray([100, 101], dtype=np.uint32),
+            motor_sensor_1=np.asarray([200, 201], dtype=np.uint32),
+            motor_state=np.asarray([0, 0x12], dtype=np.uint32),
+            motor_reserve_0=np.asarray([1, 2], dtype=np.uint32),
+            motor_reserve_1=np.asarray([3, 4], dtype=np.uint32),
+            motor_reserve_2=np.asarray([5, 6], dtype=np.uint32),
+            motor_reserve_3=np.asarray([7, 8], dtype=np.uint32),
+            motor_diagnostic_flags=np.asarray([0, 1], dtype=np.uint32),
+            motor_diagnostic_flag_schema=1,
+            diagnostic_warning_count=0,
+            diagnostic_critical_count=1,
+            diagnostic_imu_flags=0,
+            mode_machine=5,
             cmd_q=np.asarray([9.0, 10.0], dtype=np.float32),
             cmd_qd=np.zeros(2, dtype=np.float32),
             cmd_kp=np.ones(2, dtype=np.float32),
@@ -112,6 +130,12 @@ class PolicyObservationRecordingTests(unittest.TestCase):
                 np.testing.assert_array_equal(
                     log["joint_torque_latest"], [[7.0, 8.0], [9.0, 10.0]]
                 )
+                np.testing.assert_array_equal(
+                    log["motor_temperature_casing"], [[41.0, 42.0], [41.0, 42.0]]
+                )
+                np.testing.assert_array_equal(log["motor_state"], [[0, 0x12], [0, 0x12]])
+                np.testing.assert_array_equal(log["motor_diagnostic_flags"], [[0, 1], [0, 1]])
+                np.testing.assert_array_equal(log["diagnostic_critical_count"], [1, 1])
 
 
 if __name__ == "__main__":

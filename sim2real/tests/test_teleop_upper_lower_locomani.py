@@ -75,6 +75,11 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
         )
         self.assertGreaterEqual(model.geom("stairs_platform").id, 0)
         self.assertGreaterEqual(model.geom("slope_up").id, 0)
+        self.assertGreaterEqual(model.geom("slope_platform").id, 0)
+        self.assertGreaterEqual(model.geom("slope_stair_down_1").id, 0)
+        self.assertGreaterEqual(model.geom("slope_stair_down_2").id, 0)
+        with self.assertRaises(KeyError):
+            model.geom("slope_down")
 
     def test_depth_camera_produces_policy_shape(self):
         model = mujoco.MjModel.from_xml_path(str(self.xml_path))
@@ -547,6 +552,11 @@ class TeleopUpperLowerLocomaniTests(unittest.TestCase):
         self.assertNotIn("max_abs_qd_des", bridge["safety"])
         self.assertNotIn("max_kp", bridge["safety"])
         self.assertNotIn("max_kd", bridge["safety"])
+        self.assertTrue(bridge["diagnostics"]["enabled"])
+        self.assertEqual(bridge["diagnostics"]["motor_casing_limit_c"], 85.0)
+        self.assertEqual(bridge["diagnostics"]["motor_winding_limit_c"], 120.0)
+        self.assertEqual(bridge["diagnostics"]["joint_velocity_limit_rad_s"], 10.0)
+        self.assertEqual(bridge["diagnostics"]["imu_angular_velocity_limit_rad_s"], 6.0)
 
     def test_spv5_2_task_option_resolves_inside_current_repository(self):
         config_path = SIM2REAL_ROOT / "config/g1/tracking_spv5_2.yaml"

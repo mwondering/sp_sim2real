@@ -316,6 +316,63 @@ struct SafetyConfig {
   double damping_publish_hz = 50.0;
 };
 
+struct DiagnosticsConfig {
+  bool enabled = false;
+  double report_interval_s = 1.0;
+  double motor_casing_warn_c = 75.0;
+  double motor_casing_limit_c = 85.0;
+  double motor_winding_warn_c = 100.0;
+  double motor_winding_limit_c = 120.0;
+  double joint_velocity_warn_rad_s = 8.0;
+  double joint_velocity_limit_rad_s = 10.0;
+  double imu_angular_velocity_warn_rad_s = 5.0;
+  double imu_angular_velocity_limit_rad_s = 6.0;
+  double joint_position_warn_margin_rad = 0.05;
+  double joint_torque_warn_ratio = 0.9;
+  bool check_joint_position = true;
+  bool check_joint_torque = true;
+  std::vector<double> joint_position_lower;
+  std::vector<double> joint_position_upper;
+  std::vector<double> joint_torque_limit;
+};
+
+enum MotorDiagnosticFlag : uint32_t {
+  kMotorStateFault = 1U << 0,
+  kCasingTemperatureWarning = 1U << 1,
+  kCasingTemperatureLimit = 1U << 2,
+  kWindingTemperatureWarning = 1U << 3,
+  kWindingTemperatureLimit = 1U << 4,
+  kJointPositionWarning = 1U << 5,
+  kJointPositionLimit = 1U << 6,
+  kJointVelocityWarning = 1U << 7,
+  kJointVelocityLimit = 1U << 8,
+  kJointTorqueWarning = 1U << 9,
+  kJointTorqueLimit = 1U << 10,
+  kMotorStateNonFinite = 1U << 11,
+};
+
+enum ImuDiagnosticFlag : uint32_t {
+  kImuAngularVelocityWarning = 1U << 0,
+  kImuAngularVelocityLimit = 1U << 1,
+  kImuStateNonFinite = 1U << 2,
+};
+
+constexpr uint32_t kMotorWarningMask =
+    kCasingTemperatureWarning | kWindingTemperatureWarning | kJointPositionWarning |
+    kJointVelocityWarning | kJointTorqueWarning;
+constexpr uint32_t kMotorCriticalMask =
+    kMotorStateFault | kCasingTemperatureLimit | kWindingTemperatureLimit |
+    kJointPositionLimit | kJointVelocityLimit | kJointTorqueLimit | kMotorStateNonFinite;
+constexpr uint32_t kImuWarningMask = kImuAngularVelocityWarning;
+constexpr uint32_t kImuCriticalMask = kImuAngularVelocityLimit | kImuStateNonFinite;
+
+struct DiagnosticSnapshot {
+  std::vector<uint32_t> motor_flags;
+  uint32_t imu_flags = 0;
+  uint32_t warning_count = 0;
+  uint32_t critical_count = 0;
+};
+
 struct BridgeConfig {
   std::string lowcmd_topic;
   std::string lowstate_topic;
@@ -323,6 +380,7 @@ struct BridgeConfig {
   FrequencyConfig freq;
   LowLevelConfig low_level;
   SafetyConfig safety;
+  DiagnosticsConfig diagnostics;
   std::vector<std::string> policy_joint_names;
   std::vector<std::string> real_joint_names;
 };
@@ -330,7 +388,70 @@ struct BridgeConfig {
 struct StateSnapshot {
   LowState low_state;
   std::vector<float> tau_real_average;
+  DiagnosticSnapshot diagnostics;
 };
+
+const std::unordered_map<std::string, std::pair<double, double>> & g1_joint_position_limits()
+{
+  // Mirror sim2real/config/g1/assets/g1.xml. These are diagnostic boundaries,
+  // not a replacement for firmware limits.
+  static const std::unordered_map<std::string, std::pair<double, double>> limits{
+      {"left_hip_pitch_joint", {-2.5307, 2.8798}},
+      {"left_hip_roll_joint", {-0.5236, 2.9671}},
+      {"left_hip_yaw_joint", {-2.7576, 2.7576}},
+      {"left_knee_joint", {-0.087267, 2.8798}},
+      {"left_ankle_pitch_joint", {-0.87267, 0.5236}},
+      {"left_ankle_roll_joint", {-0.2618, 0.2618}},
+      {"right_hip_pitch_joint", {-2.5307, 2.8798}},
+      {"right_hip_roll_joint", {-2.9671, 0.5236}},
+      {"right_hip_yaw_joint", {-2.7576, 2.7576}},
+      {"right_knee_joint", {-0.087267, 2.8798}},
+      {"right_ankle_pitch_joint", {-0.87267, 0.5236}},
+      {"right_ankle_roll_joint", {-0.2618, 0.2618}},
+      {"waist_yaw_joint", {-2.618, 2.618}},
+      {"waist_roll_joint", {-0.52, 0.52}},
+      {"waist_pitch_joint", {-0.52, 0.52}},
+      {"left_shoulder_pitch_joint", {-3.0892, 2.6704}},
+      {"left_shoulder_roll_joint", {-1.5882, 2.2515}},
+      {"left_shoulder_yaw_joint", {-2.618, 2.618}},
+      {"left_elbow_joint", {-1.0472, 2.0944}},
+      {"left_wrist_roll_joint", {-1.97222, 1.97222}},
+      {"left_wrist_pitch_joint", {-1.61443, 1.61443}},
+      {"left_wrist_yaw_joint", {-1.61443, 1.61443}},
+      {"right_shoulder_pitch_joint", {-3.0892, 2.6704}},
+      {"right_shoulder_roll_joint", {-2.2515, 1.5882}},
+      {"right_shoulder_yaw_joint", {-2.618, 2.618}},
+      {"right_elbow_joint", {-1.0472, 2.0944}},
+      {"right_wrist_roll_joint", {-1.97222, 1.97222}},
+      {"right_wrist_pitch_joint", {-1.61443, 1.61443}},
+      {"right_wrist_yaw_joint", {-1.61443, 1.61443}},
+  };
+  return limits;
+}
+
+const std::unordered_map<std::string, double> & g1_joint_torque_limits()
+{
+  // Mirror actuator ctrlrange values in sim2real/config/g1/assets/g1.xml.
+  static const std::unordered_map<std::string, double> limits{
+      {"left_hip_pitch_joint", 88.0}, {"left_hip_roll_joint", 139.0},
+      {"left_hip_yaw_joint", 88.0}, {"left_knee_joint", 139.0},
+      {"left_ankle_pitch_joint", 35.0}, {"left_ankle_roll_joint", 35.0},
+      {"right_hip_pitch_joint", 88.0}, {"right_hip_roll_joint", 139.0},
+      {"right_hip_yaw_joint", 88.0}, {"right_knee_joint", 139.0},
+      {"right_ankle_pitch_joint", 35.0}, {"right_ankle_roll_joint", 35.0},
+      {"waist_yaw_joint", 88.0}, {"waist_roll_joint", 35.0},
+      {"waist_pitch_joint", 35.0},
+      {"left_shoulder_pitch_joint", 25.0}, {"left_shoulder_roll_joint", 25.0},
+      {"left_shoulder_yaw_joint", 25.0}, {"left_elbow_joint", 25.0},
+      {"left_wrist_roll_joint", 25.0}, {"left_wrist_pitch_joint", 5.0},
+      {"left_wrist_yaw_joint", 5.0},
+      {"right_shoulder_pitch_joint", 25.0}, {"right_shoulder_roll_joint", 25.0},
+      {"right_shoulder_yaw_joint", 25.0}, {"right_elbow_joint", 25.0},
+      {"right_wrist_roll_joint", 25.0}, {"right_wrist_pitch_joint", 5.0},
+      {"right_wrist_yaw_joint", 5.0},
+  };
+  return limits;
+}
 
 BridgeConfig load_config(const std::string & path)
 {
@@ -414,6 +535,67 @@ BridgeConfig load_config(const std::string & path)
     }
   }
 
+  const YAML::Node diagnostics = raw["diagnostics"];
+  if (diagnostics) {
+    cfg.diagnostics.enabled = yaml_value_or<bool>(diagnostics["enabled"], false);
+    cfg.diagnostics.report_interval_s =
+        yaml_value_or<double>(diagnostics["report_interval_s"], 1.0);
+    cfg.diagnostics.motor_casing_warn_c =
+        yaml_value_or<double>(diagnostics["motor_casing_warn_c"], 75.0);
+    cfg.diagnostics.motor_casing_limit_c =
+        yaml_value_or<double>(diagnostics["motor_casing_limit_c"], 85.0);
+    cfg.diagnostics.motor_winding_warn_c =
+        yaml_value_or<double>(diagnostics["motor_winding_warn_c"], 100.0);
+    cfg.diagnostics.motor_winding_limit_c =
+        yaml_value_or<double>(diagnostics["motor_winding_limit_c"], 120.0);
+    cfg.diagnostics.joint_velocity_warn_rad_s =
+        yaml_value_or<double>(diagnostics["joint_velocity_warn_rad_s"], 8.0);
+    cfg.diagnostics.joint_velocity_limit_rad_s =
+        yaml_value_or<double>(diagnostics["joint_velocity_limit_rad_s"], 10.0);
+    cfg.diagnostics.imu_angular_velocity_warn_rad_s =
+        yaml_value_or<double>(diagnostics["imu_angular_velocity_warn_rad_s"], 5.0);
+    cfg.diagnostics.imu_angular_velocity_limit_rad_s =
+        yaml_value_or<double>(diagnostics["imu_angular_velocity_limit_rad_s"], 6.0);
+    cfg.diagnostics.joint_position_warn_margin_rad =
+        yaml_value_or<double>(diagnostics["joint_position_warn_margin_rad"], 0.05);
+    cfg.diagnostics.joint_torque_warn_ratio =
+        yaml_value_or<double>(diagnostics["joint_torque_warn_ratio"], 0.9);
+    cfg.diagnostics.check_joint_position =
+        yaml_value_or<bool>(diagnostics["check_joint_position"], true);
+    cfg.diagnostics.check_joint_torque =
+        yaml_value_or<bool>(diagnostics["check_joint_torque"], true);
+  }
+  if (cfg.diagnostics.enabled) {
+    const auto validate_warning_limit = [](double warning, double limit, const std::string & name) {
+      if (!(warning >= 0.0 && warning < limit)) {
+        throw std::runtime_error(
+            "diagnostics." + name + " warning must be non-negative and below its limit");
+      }
+    };
+    if (cfg.diagnostics.report_interval_s <= 0.0) {
+      throw std::runtime_error("diagnostics.report_interval_s must be positive");
+    }
+    validate_warning_limit(
+        cfg.diagnostics.motor_casing_warn_c, cfg.diagnostics.motor_casing_limit_c,
+        "motor_casing temperature");
+    validate_warning_limit(
+        cfg.diagnostics.motor_winding_warn_c, cfg.diagnostics.motor_winding_limit_c,
+        "motor_winding temperature");
+    validate_warning_limit(
+        cfg.diagnostics.joint_velocity_warn_rad_s, cfg.diagnostics.joint_velocity_limit_rad_s,
+        "joint_velocity");
+    validate_warning_limit(
+        cfg.diagnostics.imu_angular_velocity_warn_rad_s,
+        cfg.diagnostics.imu_angular_velocity_limit_rad_s, "imu_angular_velocity");
+    if (cfg.diagnostics.joint_position_warn_margin_rad < 0.0) {
+      throw std::runtime_error("diagnostics.joint_position_warn_margin_rad must be non-negative");
+    }
+    if (!(cfg.diagnostics.joint_torque_warn_ratio > 0.0 &&
+          cfg.diagnostics.joint_torque_warn_ratio < 1.0)) {
+      throw std::runtime_error("diagnostics.joint_torque_warn_ratio must be in (0, 1)");
+    }
+  }
+
   cfg.policy_joint_names = yaml_string_vector(raw["policy_joint_names"], "policy_joint_names");
   cfg.real_joint_names = yaml_string_vector(raw["real_joint_names"], "real_joint_names");
   if (cfg.policy_joint_names.empty() || cfg.real_joint_names.empty()) {
@@ -421,6 +603,20 @@ BridgeConfig load_config(const std::string & path)
   }
   if (cfg.real_joint_names.size() > static_cast<size_t>(kG1MotorCount)) {
     throw std::runtime_error("real_joint_names has more joints than supported G1 motors");
+  }
+  cfg.diagnostics.joint_position_lower.reserve(cfg.real_joint_names.size());
+  cfg.diagnostics.joint_position_upper.reserve(cfg.real_joint_names.size());
+  cfg.diagnostics.joint_torque_limit.reserve(cfg.real_joint_names.size());
+  for (const auto & joint_name : cfg.real_joint_names) {
+    const auto position_it = g1_joint_position_limits().find(joint_name);
+    const auto torque_it = g1_joint_torque_limits().find(joint_name);
+    if (position_it == g1_joint_position_limits().end() ||
+        torque_it == g1_joint_torque_limits().end()) {
+      throw std::runtime_error("No built-in G1 diagnostic limit for joint: " + joint_name);
+    }
+    cfg.diagnostics.joint_position_lower.push_back(position_it->second.first);
+    cfg.diagnostics.joint_position_upper.push_back(position_it->second.second);
+    cfg.diagnostics.joint_torque_limit.push_back(torque_it->second);
   }
   return cfg;
 }
@@ -435,6 +631,18 @@ struct RemoteState {
   float ly = 0.0f;
   float rx = 0.0f;
   float ry = 0.0f;
+};
+
+struct MotorTelemetry {
+  std::vector<float> ddq;
+  std::vector<float> casing_temperature;
+  std::vector<float> winding_temperature;
+  std::vector<float> voltage;
+  std::vector<uint32_t> mode;
+  std::vector<uint32_t> sensor_0;
+  std::vector<uint32_t> sensor_1;
+  std::vector<uint32_t> state;
+  std::array<std::vector<uint32_t>, 4> reserve;
 };
 
 float read_float_le(const std::array<uint8_t, 40> & bytes, size_t offset)
@@ -479,10 +687,23 @@ PackedArray append_float_array(std::vector<uint8_t> & payload, const std::vector
   return ref;
 }
 
-std::string ndarray_meta(const PackedArray & ref)
+PackedArray append_u32_array(std::vector<uint8_t> & payload, const std::vector<uint32_t> & values)
+{
+  PackedArray ref;
+  ref.offset = payload.size();
+  ref.count = values.size();
+  ref.nbytes = values.size() * sizeof(uint32_t);
+  payload.resize(ref.offset + ref.nbytes);
+  if (ref.nbytes > 0) {
+    std::memcpy(payload.data() + ref.offset, values.data(), ref.nbytes);
+  }
+  return ref;
+}
+
+std::string ndarray_meta(const PackedArray & ref, const char * dtype = "<f4")
 {
   std::ostringstream out;
-  out << "{\"" << kTypeKey << "\":\"ndarray\",\"dtype\":\"<f4\",\"shape\":[" << ref.count
+  out << "{\"" << kTypeKey << "\":\"ndarray\",\"dtype\":\"" << dtype << "\",\"shape\":[" << ref.count
       << "],\"offset\":" << ref.offset << ",\"nbytes\":" << ref.nbytes << "}";
   return out.str();
 }
@@ -564,12 +785,17 @@ class UdpLatestSender {
       const std::vector<float> & q, const std::vector<float> & dq, const std::vector<float> & tau,
       const std::vector<float> & tau_latest,
       const std::vector<float> & quat,
-      const std::vector<float> & gyro, const std::vector<float> & linacc, const RemoteState & remote)
+      const std::vector<float> & gyro, const std::vector<float> & linacc, const RemoteState & remote,
+      const MotorTelemetry & motor, const DiagnosticSnapshot & diagnostics, uint8_t mode_machine)
   {
     std::vector<uint8_t> payload;
     payload.reserve(
-        (q.size() + dq.size() + tau.size() + tau_latest.size() + quat.size() + gyro.size() + linacc.size()) *
-        sizeof(float));
+        (q.size() + dq.size() + tau.size() + tau_latest.size() + quat.size() + gyro.size() + linacc.size() +
+         motor.ddq.size() + motor.casing_temperature.size() + motor.winding_temperature.size() +
+         motor.voltage.size()) * sizeof(float) +
+        (motor.mode.size() + motor.sensor_0.size() + motor.sensor_1.size() + motor.state.size() +
+         diagnostics.motor_flags.size() + motor.reserve[0].size() + motor.reserve[1].size() +
+         motor.reserve[2].size() + motor.reserve[3].size()) * sizeof(uint32_t));
     const PackedArray q_ref = append_float_array(payload, q);
     const PackedArray dq_ref = append_float_array(payload, dq);
     const PackedArray tau_ref = append_float_array(payload, tau);
@@ -577,13 +803,45 @@ class UdpLatestSender {
     const PackedArray quat_ref = append_float_array(payload, quat);
     const PackedArray gyro_ref = append_float_array(payload, gyro);
     const PackedArray linacc_ref = append_float_array(payload, linacc);
+    const PackedArray motor_ddq_ref = append_float_array(payload, motor.ddq);
+    const PackedArray casing_temperature_ref = append_float_array(payload, motor.casing_temperature);
+    const PackedArray winding_temperature_ref = append_float_array(payload, motor.winding_temperature);
+    const PackedArray motor_voltage_ref = append_float_array(payload, motor.voltage);
+    const PackedArray motor_mode_ref = append_u32_array(payload, motor.mode);
+    const PackedArray motor_sensor_0_ref = append_u32_array(payload, motor.sensor_0);
+    const PackedArray motor_sensor_1_ref = append_u32_array(payload, motor.sensor_1);
+    const PackedArray motor_state_ref = append_u32_array(payload, motor.state);
+    const PackedArray motor_reserve_0_ref = append_u32_array(payload, motor.reserve[0]);
+    const PackedArray motor_reserve_1_ref = append_u32_array(payload, motor.reserve[1]);
+    const PackedArray motor_reserve_2_ref = append_u32_array(payload, motor.reserve[2]);
+    const PackedArray motor_reserve_3_ref = append_u32_array(payload, motor.reserve[3]);
+    const PackedArray motor_diagnostic_flags_ref = append_u32_array(payload, diagnostics.motor_flags);
 
     std::ostringstream meta;
     meta << "{\"q\":" << ndarray_meta(q_ref) << ",\"dq\":" << ndarray_meta(dq_ref)
          << ",\"tau\":" << ndarray_meta(tau_ref)
          << ",\"tau_latest\":" << ndarray_meta(tau_latest_ref)
          << ",\"quat_wxyz\":" << ndarray_meta(quat_ref) << ",\"gyro\":" << ndarray_meta(gyro_ref)
-         << ",\"linacc\":" << ndarray_meta(linacc_ref) << ",\"buttons\":{"
+         << ",\"linacc\":" << ndarray_meta(linacc_ref)
+         << ",\"motor_ddq\":" << ndarray_meta(motor_ddq_ref)
+         << ",\"motor_temperature_casing\":" << ndarray_meta(casing_temperature_ref)
+         << ",\"motor_temperature_winding\":" << ndarray_meta(winding_temperature_ref)
+         << ",\"motor_voltage\":" << ndarray_meta(motor_voltage_ref)
+         << ",\"motor_mode\":" << ndarray_meta(motor_mode_ref, "<u4")
+         << ",\"motor_sensor_0\":" << ndarray_meta(motor_sensor_0_ref, "<u4")
+         << ",\"motor_sensor_1\":" << ndarray_meta(motor_sensor_1_ref, "<u4")
+         << ",\"motor_state\":" << ndarray_meta(motor_state_ref, "<u4")
+         << ",\"motor_reserve_0\":" << ndarray_meta(motor_reserve_0_ref, "<u4")
+         << ",\"motor_reserve_1\":" << ndarray_meta(motor_reserve_1_ref, "<u4")
+         << ",\"motor_reserve_2\":" << ndarray_meta(motor_reserve_2_ref, "<u4")
+         << ",\"motor_reserve_3\":" << ndarray_meta(motor_reserve_3_ref, "<u4")
+         << ",\"motor_diagnostic_flags\":" << ndarray_meta(motor_diagnostic_flags_ref, "<u4")
+         << ",\"motor_diagnostic_flag_schema\":1"
+         << ",\"diagnostic_warning_count\":" << diagnostics.warning_count
+         << ",\"diagnostic_critical_count\":" << diagnostics.critical_count
+         << ",\"diagnostic_imu_flags\":" << diagnostics.imu_flags
+         << ",\"mode_machine\":" << static_cast<uint32_t>(mode_machine)
+         << ",\"buttons\":{"
          << "\"start\":" << bool_text(remote.start) << ",\"stop\":" << bool_text(remote.stop)
          << ",\"A\":" << bool_text(remote.a) << ",\"up\":" << bool_text(remote.up)
          << ",\"down\":" << bool_text(remote.down) << "},\"sticks\":{";
@@ -981,6 +1239,23 @@ class G1UdpBridge {
                 << " damping_hz=" << cfg_.safety.damping_publish_hz
                 << std::endl;
     }
+    if (cfg_.diagnostics.enabled) {
+      std::cout << "[MotorDiag] enabled action=report-only"
+                << " report_interval=" << cfg_.diagnostics.report_interval_s << "s"
+                << " casing_warn/limit=" << cfg_.diagnostics.motor_casing_warn_c << "/"
+                << cfg_.diagnostics.motor_casing_limit_c << "C"
+                << " winding_warn/limit=" << cfg_.diagnostics.motor_winding_warn_c << "/"
+                << cfg_.diagnostics.motor_winding_limit_c << "C"
+                << " joint_dq_warn/limit=" << cfg_.diagnostics.joint_velocity_warn_rad_s << "/"
+                << cfg_.diagnostics.joint_velocity_limit_rad_s << "rad/s"
+                << " imu_gyro_warn/limit=" << cfg_.diagnostics.imu_angular_velocity_warn_rad_s << "/"
+                << cfg_.diagnostics.imu_angular_velocity_limit_rad_s << "rad/s"
+                << " position_check=" << (cfg_.diagnostics.check_joint_position ? "on" : "off")
+                << " torque_check=" << (cfg_.diagnostics.check_joint_torque ? "on" : "off")
+                << std::endl;
+    } else {
+      std::cout << "[MotorDiag] checks disabled; raw motor telemetry is still forwarded" << std::endl;
+    }
     if (cfg_.freq.state_publish_mode == StatePublishMode::LowStateTick) {
       std::cout << "[G1Bridge] state mode: LowState.tick target decimation -> dedicated UDP state sender thread"
                 << std::endl;
@@ -1174,7 +1449,8 @@ class G1UdpBridge {
     return true;
   }
 
-  bool process_lowstate_sample(const LowState & low_state, bool allow_tick_publish)
+  bool process_lowstate_sample(
+      const LowState & low_state, bool allow_tick_publish, DiagnosticSnapshot * diagnostic_out = nullptr)
   {
     if (fatal_shutdown_requested_.load(std::memory_order_relaxed) ||
         g_stop_requested.load(std::memory_order_relaxed)) {
@@ -1197,6 +1473,10 @@ class G1UdpBridge {
     if (!tick_decision.unique) {
       return false;
     }
+    DiagnosticSnapshot diagnostics = evaluate_diagnostics(low_state);
+    if (diagnostic_out != nullptr) {
+      *diagnostic_out = diagnostics;
+    }
     accumulate_joint_torque(low_state);
 
     if (!have_lowstate_.load(std::memory_order_relaxed)) {
@@ -1208,7 +1488,7 @@ class G1UdpBridge {
     }
 
     if (allow_tick_publish && tick_decision.publish_now) {
-      enqueue_state_snapshot(low_state, consume_joint_torque_average());
+      enqueue_state_snapshot(low_state, consume_joint_torque_average(), std::move(diagnostics));
     }
     return true;
   }
@@ -1283,6 +1563,254 @@ class G1UdpBridge {
     g_stop_requested.store(true, std::memory_order_relaxed);
   }
 
+  static std::string motor_diagnostic_flag_names(uint32_t flags)
+  {
+    const std::array<std::pair<uint32_t, const char *>, 12> names{{
+        {kMotorStateFault, "motor_state_fault"},
+        {kCasingTemperatureWarning, "casing_temperature_warning"},
+        {kCasingTemperatureLimit, "casing_temperature_limit"},
+        {kWindingTemperatureWarning, "winding_temperature_warning"},
+        {kWindingTemperatureLimit, "winding_temperature_limit"},
+        {kJointPositionWarning, "joint_position_warning"},
+        {kJointPositionLimit, "joint_position_limit"},
+        {kJointVelocityWarning, "joint_velocity_warning"},
+        {kJointVelocityLimit, "joint_velocity_limit"},
+        {kJointTorqueWarning, "joint_torque_warning"},
+        {kJointTorqueLimit, "joint_torque_limit"},
+        {kMotorStateNonFinite, "non_finite_motor_feedback"},
+    }};
+    std::ostringstream out;
+    bool first = true;
+    for (const auto & item : names) {
+      if ((flags & item.first) == 0) {
+        continue;
+      }
+      if (!first) {
+        out << ",";
+      }
+      out << item.second;
+      first = false;
+    }
+    return out.str();
+  }
+
+  static std::string imu_diagnostic_flag_names(uint32_t flags)
+  {
+    std::ostringstream out;
+    if ((flags & kImuAngularVelocityWarning) != 0) {
+      out << "imu_angular_velocity_warning";
+    }
+    if ((flags & kImuAngularVelocityLimit) != 0) {
+      if (out.tellp() > 0) {
+        out << ",";
+      }
+      out << "imu_angular_velocity_limit";
+    }
+    if ((flags & kImuStateNonFinite) != 0) {
+      if (out.tellp() > 0) {
+        out << ",";
+      }
+      out << "non_finite_imu_feedback";
+    }
+    return out.str();
+  }
+
+  DiagnosticSnapshot evaluate_diagnostics(const LowState & low_state)
+  {
+    DiagnosticSnapshot snapshot;
+    snapshot.motor_flags.assign(cfg_.real_joint_names.size(), 0U);
+    if (!cfg_.diagnostics.enabled) {
+      return snapshot;
+    }
+
+    const auto & motors = low_state.motor_state();
+    float max_casing = -std::numeric_limits<float>::infinity();
+    float max_winding = -std::numeric_limits<float>::infinity();
+    float max_abs_velocity = 0.0f;
+    float max_abs_torque = 0.0f;
+    size_t max_casing_index = 0;
+    size_t max_winding_index = 0;
+    size_t max_velocity_index = 0;
+    size_t max_torque_index = 0;
+
+    for (size_t i = 0; i < cfg_.real_joint_names.size(); ++i) {
+      const auto & motor = motors.at(i);
+      uint32_t flags = 0;
+      const float q = motor.q();
+      const float dq = motor.dq();
+      const float ddq = motor.ddq();
+      const float tau = motor.tau_est();
+      const float voltage = motor.vol();
+      const float casing = static_cast<float>(motor.temperature()[0]);
+      const float winding = static_cast<float>(motor.temperature()[1]);
+
+      if (!std::isfinite(q) || !std::isfinite(dq) || !std::isfinite(ddq) ||
+          !std::isfinite(tau) || !std::isfinite(voltage)) {
+        flags |= kMotorStateNonFinite;
+      }
+      if (motor.motorstate() != 0U) {
+        flags |= kMotorStateFault;
+      }
+      if (casing > cfg_.diagnostics.motor_casing_limit_c) {
+        flags |= kCasingTemperatureLimit;
+      } else if (casing > cfg_.diagnostics.motor_casing_warn_c) {
+        flags |= kCasingTemperatureWarning;
+      }
+      if (winding > cfg_.diagnostics.motor_winding_limit_c) {
+        flags |= kWindingTemperatureLimit;
+      } else if (winding > cfg_.diagnostics.motor_winding_warn_c) {
+        flags |= kWindingTemperatureWarning;
+      }
+
+      if (cfg_.diagnostics.check_joint_position && std::isfinite(q)) {
+        const double lower = cfg_.diagnostics.joint_position_lower.at(i);
+        const double upper = cfg_.diagnostics.joint_position_upper.at(i);
+        if (q < lower || q > upper) {
+          flags |= kJointPositionLimit;
+        } else if (q < lower + cfg_.diagnostics.joint_position_warn_margin_rad ||
+                   q > upper - cfg_.diagnostics.joint_position_warn_margin_rad) {
+          flags |= kJointPositionWarning;
+        }
+      }
+
+      const float abs_velocity = std::fabs(dq);
+      if (std::isfinite(abs_velocity)) {
+        if (abs_velocity > cfg_.diagnostics.joint_velocity_limit_rad_s) {
+          flags |= kJointVelocityLimit;
+        } else if (abs_velocity > cfg_.diagnostics.joint_velocity_warn_rad_s) {
+          flags |= kJointVelocityWarning;
+        }
+      }
+
+      const float abs_torque = std::fabs(tau);
+      if (cfg_.diagnostics.check_joint_torque && std::isfinite(abs_torque)) {
+        const double limit = cfg_.diagnostics.joint_torque_limit.at(i);
+        if (abs_torque > limit) {
+          flags |= kJointTorqueLimit;
+        } else if (abs_torque > limit * cfg_.diagnostics.joint_torque_warn_ratio) {
+          flags |= kJointTorqueWarning;
+        }
+      }
+
+      snapshot.motor_flags[i] = flags;
+      if ((flags & kMotorCriticalMask) != 0) {
+        ++snapshot.critical_count;
+      } else if ((flags & kMotorWarningMask) != 0) {
+        ++snapshot.warning_count;
+      }
+      if (casing > max_casing) {
+        max_casing = casing;
+        max_casing_index = i;
+      }
+      if (winding > max_winding) {
+        max_winding = winding;
+        max_winding_index = i;
+      }
+      if (abs_velocity > max_abs_velocity) {
+        max_abs_velocity = abs_velocity;
+        max_velocity_index = i;
+      }
+      if (abs_torque > max_abs_torque) {
+        max_abs_torque = abs_torque;
+        max_torque_index = i;
+      }
+    }
+
+    float max_abs_imu_angular_velocity = 0.0f;
+    for (const float value : low_state.imu_state().gyroscope()) {
+      if (!std::isfinite(value)) {
+        snapshot.imu_flags |= kImuStateNonFinite;
+        continue;
+      }
+      max_abs_imu_angular_velocity = std::max(max_abs_imu_angular_velocity, std::fabs(value));
+    }
+    if (max_abs_imu_angular_velocity > cfg_.diagnostics.imu_angular_velocity_limit_rad_s) {
+      snapshot.imu_flags |= kImuAngularVelocityLimit;
+    } else if (max_abs_imu_angular_velocity > cfg_.diagnostics.imu_angular_velocity_warn_rad_s) {
+      snapshot.imu_flags |= kImuAngularVelocityWarning;
+    }
+    if ((snapshot.imu_flags & kImuCriticalMask) != 0) {
+      ++snapshot.critical_count;
+    } else if ((snapshot.imu_flags & kImuWarningMask) != 0) {
+      ++snapshot.warning_count;
+    }
+
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+    if (previous_motor_diagnostic_flags_.size() != snapshot.motor_flags.size()) {
+      previous_motor_diagnostic_flags_.assign(snapshot.motor_flags.size(), 0U);
+      previous_motor_state_codes_.assign(snapshot.motor_flags.size(), 0U);
+    }
+    for (size_t i = 0; i < snapshot.motor_flags.size(); ++i) {
+      const uint32_t flags = snapshot.motor_flags[i];
+      const uint32_t motor_state_code = motors.at(i).motorstate();
+      if (flags == previous_motor_diagnostic_flags_[i] &&
+          motor_state_code == previous_motor_state_codes_[i]) {
+        continue;
+      }
+      const auto & motor = motors.at(i);
+      if (flags == 0U) {
+        std::cout << "[MotorDiag][RECOVERED] joint=" << cfg_.real_joint_names[i] << std::endl;
+      } else {
+        const bool critical = (flags & kMotorCriticalMask) != 0;
+        std::ostream & stream = critical ? std::cerr : std::cout;
+        if (critical) {
+          stream << kAnsiBoldRed;
+        }
+        stream << "[MotorDiag][" << (critical ? "CRITICAL" : "WARNING") << "] joint="
+               << cfg_.real_joint_names[i] << " flags=" << motor_diagnostic_flag_names(flags)
+               << " motorstate=0x" << std::hex << motor.motorstate() << std::dec
+               << " q=" << motor.q() << "rad dq=" << motor.dq() << "rad/s tau_est="
+               << motor.tau_est() << "Nm casing=" << motor.temperature()[0]
+               << "C winding=" << motor.temperature()[1] << "C mode="
+               << static_cast<uint32_t>(motor.mode());
+        if (critical) {
+          stream << kAnsiReset;
+        }
+        stream << std::endl;
+      }
+    }
+    if (snapshot.imu_flags != previous_imu_diagnostic_flags_) {
+      if (snapshot.imu_flags == 0U) {
+        std::cout << "[MotorDiag][RECOVERED] imu angular velocity" << std::endl;
+      } else {
+        const bool critical = (snapshot.imu_flags & kImuCriticalMask) != 0;
+        std::ostream & stream = critical ? std::cerr : std::cout;
+        if (critical) {
+          stream << kAnsiBoldRed;
+        }
+        stream << "[MotorDiag][" << (critical ? "CRITICAL" : "WARNING")
+               << "] flags=" << imu_diagnostic_flag_names(snapshot.imu_flags)
+               << " max_abs_gyro=" << max_abs_imu_angular_velocity << "rad/s";
+        if (critical) {
+          stream << kAnsiReset;
+        }
+        stream << std::endl;
+      }
+    }
+
+    previous_motor_diagnostic_flags_ = snapshot.motor_flags;
+    for (size_t i = 0; i < previous_motor_state_codes_.size(); ++i) {
+      previous_motor_state_codes_[i] = motors.at(i).motorstate();
+    }
+    previous_imu_diagnostic_flags_ = snapshot.imu_flags;
+    const auto now = SteadyClock::now();
+    if (!next_diagnostic_report_time_ || now >= *next_diagnostic_report_time_) {
+      std::cout << "[MotorDiag] status="
+                << (snapshot.critical_count > 0 ? "CRITICAL" : (snapshot.warning_count > 0 ? "WARNING" : "OK"))
+                << " warning_sources=" << snapshot.warning_count
+                << " critical_sources=" << snapshot.critical_count
+                << " max_casing=" << max_casing << "C(" << cfg_.real_joint_names[max_casing_index] << ")"
+                << " max_winding=" << max_winding << "C(" << cfg_.real_joint_names[max_winding_index] << ")"
+                << " max_abs_dq=" << max_abs_velocity << "rad/s(" << cfg_.real_joint_names[max_velocity_index]
+                << ") max_abs_tau=" << max_abs_torque << "Nm(" << cfg_.real_joint_names[max_torque_index]
+                << ") max_abs_gyro=" << max_abs_imu_angular_velocity << "rad/s"
+                << " mode_machine=" << static_cast<uint32_t>(low_state.mode_machine()) << std::endl;
+      next_diagnostic_report_time_ = now + std::chrono::duration_cast<SteadyClock::duration>(
+          std::chrono::duration<double>(cfg_.diagnostics.report_interval_s));
+    }
+    return snapshot;
+  }
+
   void accumulate_joint_torque(const LowState & low_state)
   {
     std::lock_guard<std::mutex> lock(torque_accumulator_mutex_);
@@ -1311,7 +1839,8 @@ class G1UdpBridge {
     return average;
   }
 
-  void enqueue_state_snapshot(const LowState & low_state, std::vector<float> tau_real_average)
+  void enqueue_state_snapshot(
+      const LowState & low_state, std::vector<float> tau_real_average, DiagnosticSnapshot diagnostics)
   {
     bool should_notify = false;
     {
@@ -1322,7 +1851,8 @@ class G1UdpBridge {
       if (pending_state_snapshot_) {
         state_snapshot_overwrite_count_.fetch_add(1, std::memory_order_relaxed);
       }
-      pending_state_snapshot_ = StateSnapshot{low_state, std::move(tau_real_average)};
+      pending_state_snapshot_ =
+          StateSnapshot{low_state, std::move(tau_real_average), std::move(diagnostics)};
       should_notify = true;
     }
     if (should_notify) {
@@ -1542,11 +2072,14 @@ class G1UdpBridge {
           timer_no_snapshot_count_.fetch_add(1, std::memory_order_relaxed);
           continue;
         }
-        if (!process_lowstate_sample(low_state, /*allow_tick_publish=*/false)) {
+        DiagnosticSnapshot diagnostics;
+        if (!process_lowstate_sample(
+                low_state, /*allow_tick_publish=*/false, &diagnostics)) {
           timer_skipped_read_count_.fetch_add(1, std::memory_order_relaxed);
           continue;
         }
-        send_state_snapshot(StateSnapshot{low_state, consume_joint_torque_average()});
+        send_state_snapshot(
+            StateSnapshot{low_state, consume_joint_torque_average(), std::move(diagnostics)});
       }
     } catch (const std::exception & exc) {
       state_send_error_count_.fetch_add(1, std::memory_order_relaxed);
@@ -1579,11 +2112,41 @@ class G1UdpBridge {
     std::vector<float> dq_policy(cfg_.policy_joint_names.size(), 0.0f);
     std::vector<float> tau_policy(cfg_.policy_joint_names.size(), 0.0f);
     std::vector<float> tau_latest_policy(cfg_.policy_joint_names.size(), 0.0f);
+    MotorTelemetry motor_policy;
+    motor_policy.ddq.resize(cfg_.policy_joint_names.size(), 0.0f);
+    motor_policy.casing_temperature.resize(cfg_.policy_joint_names.size(), 0.0f);
+    motor_policy.winding_temperature.resize(cfg_.policy_joint_names.size(), 0.0f);
+    motor_policy.voltage.resize(cfg_.policy_joint_names.size(), 0.0f);
+    motor_policy.mode.resize(cfg_.policy_joint_names.size(), 0U);
+    motor_policy.sensor_0.resize(cfg_.policy_joint_names.size(), 0U);
+    motor_policy.sensor_1.resize(cfg_.policy_joint_names.size(), 0U);
+    motor_policy.state.resize(cfg_.policy_joint_names.size(), 0U);
+    for (auto & reserve : motor_policy.reserve) {
+      reserve.resize(cfg_.policy_joint_names.size(), 0U);
+    }
+    DiagnosticSnapshot diagnostics_policy = snapshot.diagnostics;
+    diagnostics_policy.motor_flags.assign(cfg_.policy_joint_names.size(), 0U);
     for (size_t i = 0; i < cfg_.policy_joint_names.size(); ++i) {
-      q_policy[i] = q_real[real_to_policy_[i]];
-      dq_policy[i] = dq_real[real_to_policy_[i]];
-      tau_policy[i] = tau_real[real_to_policy_[i]];
-      tau_latest_policy[i] = tau_latest_real[real_to_policy_[i]];
+      const size_t real_index = real_to_policy_[i];
+      const auto & motor = low_state.motor_state().at(real_index);
+      q_policy[i] = q_real[real_index];
+      dq_policy[i] = dq_real[real_index];
+      tau_policy[i] = tau_real[real_index];
+      tau_latest_policy[i] = tau_latest_real[real_index];
+      motor_policy.ddq[i] = motor.ddq();
+      motor_policy.casing_temperature[i] = static_cast<float>(motor.temperature()[0]);
+      motor_policy.winding_temperature[i] = static_cast<float>(motor.temperature()[1]);
+      motor_policy.voltage[i] = motor.vol();
+      motor_policy.mode[i] = static_cast<uint32_t>(motor.mode());
+      motor_policy.sensor_0[i] = motor.sensor()[0];
+      motor_policy.sensor_1[i] = motor.sensor()[1];
+      motor_policy.state[i] = motor.motorstate();
+      for (size_t reserve_index = 0; reserve_index < motor_policy.reserve.size(); ++reserve_index) {
+        motor_policy.reserve[reserve_index][i] = motor.reserve()[reserve_index];
+      }
+      if (real_index < snapshot.diagnostics.motor_flags.size()) {
+        diagnostics_policy.motor_flags[i] = snapshot.diagnostics.motor_flags[real_index];
+      }
     }
 
     const auto & imu = low_state.imu_state();
@@ -1595,7 +2158,8 @@ class G1UdpBridge {
 
     try {
       state_sender_.send_state(
-          q_policy, dq_policy, tau_policy, tau_latest_policy, quat, gyro, linacc, remote);
+          q_policy, dq_policy, tau_policy, tau_latest_policy, quat, gyro, linacc, remote,
+          motor_policy, diagnostics_policy, low_state.mode_machine());
       state_forward_count_.fetch_add(1, std::memory_order_relaxed);
     } catch (const std::exception & exc) {
       state_send_error_count_.fetch_add(1, std::memory_order_relaxed);
@@ -1914,6 +2478,11 @@ class G1UdpBridge {
   std::mutex torque_accumulator_mutex_;
   std::vector<double> torque_sum_real_;
   size_t torque_sample_count_ = 0;
+  std::mutex diagnostics_mutex_;
+  std::vector<uint32_t> previous_motor_diagnostic_flags_;
+  std::vector<uint32_t> previous_motor_state_codes_;
+  uint32_t previous_imu_diagnostic_flags_ = 0;
+  std::optional<SteadyClock::time_point> next_diagnostic_report_time_;
   std::mutex state_snapshot_mutex_;
   std::condition_variable state_snapshot_cv_;
   std::optional<StateSnapshot> pending_state_snapshot_;

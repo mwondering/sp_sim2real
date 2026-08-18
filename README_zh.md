@@ -404,6 +404,19 @@ taskset -c 4-7 uv run src/deploy.py --robot g1 --no-record \
 7. 使用 UDP 选择器或 XR/PICO 输入 motion。
 8. 按遥控器 `select` 或配置的停止键退出。
 
+### 电机安全诊断
+
+G1 bridge 默认启用只读诊断。它直接检查每个 `LowState.motor_state` 的 `motorstate` 原始故障码、驱动模式、外壳/绕组温度、电压、位置、速度和估算力矩，同时检查 IMU 角速度。诊断只报警和记录，不会自行修改控制命令或触发阻尼。
+
+默认硬阈值与仓库内 Unitree SDK 的 G1 runtime termination 保持一致：外壳温度 85 °C、绕组温度 120 °C、关节速度 10 rad/s、IMU 角速度 6 rad/s；预警阈值分别为 75 °C、100 °C、8 rad/s、5 rad/s。关节位置和估算力矩还会按照 `sim2real/config/g1/assets/g1.xml` 中的 G1 边界检查。温度/速度阈值、位置预警余量、力矩预警比例和检查开关可在 `g1_sim2real/config/g1_bridge.yaml` 的 `diagnostics` 段调整。
+
+运行时重点查看两处输出：
+
+- bridge 终端的 `[MotorDiag][WARNING]`、`[MotorDiag][CRITICAL]` 和 `[MotorDiag][RECOVERED]` 会给出关节名、原始 `motorstate` 十六进制值、位置、速度、力矩与两路温度；每秒的 `[MotorDiag] status=...` 是当前摘要。
+- `deploy.py` 终端会复述诊断状态变化。未使用 `--no-record` 时，策略 NPZ 还会保存 `motor_temperature_*`、`motor_voltage`、`motor_state`、`motor_diagnostic_flags`、`diagnostic_*` 和 `mode_machine` 等字段，便于把进入阻尼前后的电机状态与动作对齐。
+
+`motorstate != 0` 是最直接的底层异常证据，但当前 SDK 未在仓库中提供 G1 故障码到具体原因的完整映射；因此日志保留原始码，不会把未知码猜测成“过热”或“过流”。同样，`LowState` 没有一个能明确说明“因何进入阻尼”的统一字段，诊断结论应以故障码、超限事件和状态切换的时间关系综合判断。
+
 ## 常见问题
 
 ### motion 能加载，但动作明显错误

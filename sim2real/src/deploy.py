@@ -9,6 +9,7 @@ from common.udp_transport import UDPRobotHigh
 from common.utils import DictToClass
 
 from runtime.policy import Policy, TrackingPolicyRaw
+from runtime.motor_diagnostics import MotorDiagnosticReporter
 from runtime.recording import PolicyRunRecorder
 from pathlib import Path
 from paths import SIM2REAL_ROOT, SUPPORTED_ROBOTS, controller_config_path, tracking_config_path
@@ -26,6 +27,9 @@ def get_config(policy_cfg_path: str) -> DictToClass:
     return policy_cfg
 
 class Controller:
+    def _create_tracking_policy(self, name, tracking_cfg):
+        return TrackingPolicyRaw(name, tracking_cfg, self)
+
     def __init__(self, args, ctrl_cfg):
         self.args = args
         self.config = ctrl_cfg
@@ -40,6 +44,26 @@ class Controller:
         self.quat = np.zeros(4, dtype=np.float32)
         self.gyro = np.zeros(3, dtype=np.float32)
         self.linacc = np.zeros(3, dtype=np.float32)
+        self.motor_ddq = np.full(self.dof_size, np.nan, dtype=np.float32)
+        self.motor_temperature_casing = np.full(self.dof_size, np.nan, dtype=np.float32)
+        self.motor_temperature_winding = np.full(self.dof_size, np.nan, dtype=np.float32)
+        self.motor_voltage = np.full(self.dof_size, np.nan, dtype=np.float32)
+        self.motor_mode = np.zeros(self.dof_size, dtype=np.uint32)
+        self.motor_sensor_0 = np.zeros(self.dof_size, dtype=np.uint32)
+        self.motor_sensor_1 = np.zeros(self.dof_size, dtype=np.uint32)
+        self.motor_state = np.zeros(self.dof_size, dtype=np.uint32)
+        self.motor_reserve_0 = np.zeros(self.dof_size, dtype=np.uint32)
+        self.motor_reserve_1 = np.zeros(self.dof_size, dtype=np.uint32)
+        self.motor_reserve_2 = np.zeros(self.dof_size, dtype=np.uint32)
+        self.motor_reserve_3 = np.zeros(self.dof_size, dtype=np.uint32)
+        self.motor_diagnostic_flags = np.zeros(self.dof_size, dtype=np.uint32)
+        self.motor_diagnostic_flag_schema = 0
+        self.diagnostic_warning_count = 0
+        self.diagnostic_critical_count = 0
+        self.diagnostic_imu_flags = 0
+        self.mode_machine = -1
+        self.have_motor_telemetry = False
+        self._motor_diagnostic_reporter = MotorDiagnosticReporter(self.policy_joint_names)
 
         self.default_qpos = np.array(self.config.default_qpos, dtype=np.float32)
         self.init_qpos = np.array(self.config.init_qpos, dtype=np.float32)
@@ -106,7 +130,7 @@ class Controller:
             tracking_cfg._pico_store = pico_store
         if bool(getattr(self.args, "force_vr_motion_source", False)):
             tracking_cfg.motion_source["type"] = "vr"
-        tracking_policy = TrackingPolicyRaw("tracking", tracking_cfg, self)
+        tracking_policy = self._create_tracking_policy("tracking", tracking_cfg)
         self.policies = {"tracking": tracking_policy}
         if tracking_policy.controller_default_qpos is not None:
             self.default_qpos[:] = tracking_policy.controller_default_qpos
@@ -119,14 +143,26 @@ class Controller:
                 "SPV5-1 requires averaged joint torque feedback, but the bridge state has no 'tau' field. "
                 "Rebuild/restart sim2sim or g1_sim2real from this repository."
             )
-        if tracking_policy.actor_profile == "spv5_2" and not self.have_tau_latest_state:
+        if tracking_policy.actor_profile in ("spv5_2", "tap_terrain") and not self.have_tau_latest_state:
             raise RuntimeError(
-                "SPV5-2 requires latest-sample joint torque feedback, but the bridge state has no "
+                f"{tracking_policy.actor_profile} requires latest-sample joint torque feedback, "
+                "but the bridge state has no "
                 "'tau_latest' field. Rebuild/restart sim2sim or g1_sim2real from this repository."
             )
         self.current_policy: Optional[Policy] = None
         self.pending_policy: Optional[Policy] = None
         self.recorder: Optional[PolicyRunRecorder] = None
+
+    def _consume_optional_motor_array(self, msg, key: str, target: np.ndarray) -> bool:
+        if key not in msg:
+            return False
+        value = np.asarray(msg[key], dtype=target.dtype)
+        if value.shape != target.shape:
+            raise ValueError(
+                f"Bridge {key} shape {value.shape} does not match controller shape {target.shape}"
+            )
+        target[:] = value
+        return True
 
     def _consume_low_state(self, msg) -> bool:
         if msg is None:
@@ -159,6 +195,43 @@ class Controller:
         self.quat[:] = np.asarray(msg["quat_wxyz"], dtype=np.float32)
         self.gyro[:] = np.asarray(msg["gyro"], dtype=np.float32)
         self.linacc[:] = np.asarray(msg.get("linacc", np.zeros(3, dtype=np.float32)), dtype=np.float32)
+
+        motor_fields = (
+            ("motor_ddq", self.motor_ddq),
+            ("motor_temperature_casing", self.motor_temperature_casing),
+            ("motor_temperature_winding", self.motor_temperature_winding),
+            ("motor_voltage", self.motor_voltage),
+            ("motor_mode", self.motor_mode),
+            ("motor_sensor_0", self.motor_sensor_0),
+            ("motor_sensor_1", self.motor_sensor_1),
+            ("motor_state", self.motor_state),
+            ("motor_reserve_0", self.motor_reserve_0),
+            ("motor_reserve_1", self.motor_reserve_1),
+            ("motor_reserve_2", self.motor_reserve_2),
+            ("motor_reserve_3", self.motor_reserve_3),
+            ("motor_diagnostic_flags", self.motor_diagnostic_flags),
+        )
+        received_motor_fields = {
+            key for key, target in motor_fields if self._consume_optional_motor_array(msg, key, target)
+        }
+        self.have_motor_telemetry = "motor_state" in received_motor_fields
+        if "motor_diagnostic_flags" in received_motor_fields:
+            self.motor_diagnostic_flag_schema = int(msg.get("motor_diagnostic_flag_schema", 0))
+            self.diagnostic_warning_count = int(msg.get("diagnostic_warning_count", 0))
+            self.diagnostic_critical_count = int(msg.get("diagnostic_critical_count", 0))
+            self.diagnostic_imu_flags = int(msg.get("diagnostic_imu_flags", 0))
+            self.mode_machine = int(msg.get("mode_machine", -1))
+            for line in self._motor_diagnostic_reporter.update(
+                flags=self.motor_diagnostic_flags,
+                motor_state=self.motor_state,
+                casing_temperature=self.motor_temperature_casing,
+                winding_temperature=self.motor_temperature_winding,
+                q=self.qj,
+                dq=self.dqj,
+                tau=self.tau_latest,
+                imu_flags=self.diagnostic_imu_flags,
+            ):
+                print(line)
 
         buttons = msg.get("buttons", {})
         self.buttons["start"] = bool(buttons.get("start", False))
@@ -240,10 +313,15 @@ class Controller:
             self.cmd_kd[:] = self.kds
             self.send_cmd()
 
-    def default_qpos_state(self):
+    def default_qpos_state(
+        self,
+        *,
+        enable_immediately: bool = True,
+        activation_label: str = "A",
+    ):
         initial_policy: Optional[Policy] = None
 
-        print("Press A to tracking policy...")
+        print(f"Press {activation_label} to tracking policy...")
 
         while True:
             self.process_state(wait_next=True)
@@ -264,8 +342,9 @@ class Controller:
 
         self.current_policy = initial_policy
         self.current_policy.fade_in()
-        self.cmd_enable = 1
-        self.send_cmd()
+        if enable_immediately:
+            self.cmd_enable = 1
+            self.send_cmd()
 
     def process_state(self, *, wait_next: bool = False, timeout_s: float | None = None) -> bool:
         if wait_next:

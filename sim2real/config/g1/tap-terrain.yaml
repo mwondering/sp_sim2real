@@ -1,0 +1,43 @@
+task_name: "TAP—terrain"
+target: "sim"
+tracking_config: "tap-terrain-policy.yaml"
+# Training resets older history slots to zero and acts on the first frame.
+history_warmup_steps: 0
+
+# Reuse the repository's terrain scene and its training-matched pelvis camera.
+scene_xml: "assets/g1_teleop_upper_lower_locomani.xml"
+sim_bridge_config: "bridge_tap_terrain.yaml"
+
+velocity_command:
+  # Virtual sticks come from sim2sim's held WASD/QE keys. No held key means
+  # [vx, vy, wz] = [0, 0, 0].
+  source: "sticks"
+  fixed: [0.0, 0.0, 0.0]
+  deadband: 0.1
+  max_vx: 1.0
+  max_vy: 0.5
+  max_wz: 0.5
+  forward_only: false
+  min_forward_speed: 0.0
+
+camera_process:
+  source: "mujoco"
+  site_name: "tap_terrain_depth_camera"
+  sim_state_connect: "tcp://127.0.0.1:28810"
+  depth_bind: "tcp://*:28811"
+  depth_connect: "tcp://127.0.0.1:28811"
+  update_hz: 50.0
+  timeout_s: 0.25
+  max_invalid_fraction: 0.6
+  seed: 0
+  preprocess:
+    contract: "tap_terrain_v1"
+    min_depth_m: 0.1
+    cutoff_distance_m: 1.2
+    crop_top: 18
+    crop_bottom: 0
+    crop_left: 16
+    crop_right: 16
+    gaussian_blur_sigma: 1.0
+    valid_threshold: 0.5
+    edge_fill_left_columns: 0

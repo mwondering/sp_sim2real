@@ -1,0 +1,35 @@
+task_name: "TAP—terrain"
+target: "real"
+tracking_config: "tap-terrain-policy.yaml"
+# Training resets older history slots to zero and acts on the first frame.
+history_warmup_steps: 0
+
+velocity_command:
+  source: "sticks"
+  fixed: [0.0, 0.0, 0.0]
+  deadband: 0.1
+  max_vx: 1.0
+  max_vy: 0.0
+  max_wz: 0.5
+  forward_only: true
+  min_forward_speed: 0.0
+
+camera_process:
+  source: "d435i"
+  depth_connect: "tcp://127.0.0.1:28811"
+  timeout_s: 0.25
+  max_invalid_fraction: 0.6
+  hardware:
+    width: 640
+    height: 360
+  preprocess:
+    contract: "tap_terrain_v1"
+    min_depth_m: 0.1
+    cutoff_distance_m: 1.2
+    crop_top: 18
+    crop_bottom: 0
+    crop_left: 16
+    crop_right: 16
+    gaussian_blur_sigma: 1.0
+    valid_threshold: 0.5
+    edge_fill_left_columns: 24
