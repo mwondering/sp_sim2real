@@ -1,0 +1,138 @@
+{
+  "format": "motion_tracking_sim2real_policy",
+  "run_name": "2026-08-12_07-59-59_latent_rl_reference808_depth_command_frozen_decoder_estimator",
+  "iteration": 18000,
+  "checkpoint": "model_18000.pt",
+  "in_keys": [
+    "spv5_2_terrain_observation"
+  ],
+  "out_keys": [
+    "action"
+  ],
+  "in_shapes": [
+    [
+      [
+        1,
+        7484
+      ]
+    ]
+  ],
+  "num_actions": 29,
+  "anchor_body_name": "pelvis",
+  "body_names": [
+    "pelvis",
+    "left_hip_yaw_link",
+    "left_knee_link",
+    "left_ankle_roll_link",
+    "right_hip_yaw_link",
+    "right_knee_link",
+    "right_ankle_roll_link",
+    "torso_link",
+    "left_shoulder_yaw_link",
+    "left_wrist_roll_link",
+    "left_wrist_yaw_link",
+    "right_shoulder_yaw_link",
+    "right_wrist_roll_link",
+    "right_wrist_yaw_link",
+    "left_hip_roll_link",
+    "right_hip_roll_link",
+    "left_shoulder_roll_link",
+    "left_elbow_link",
+    "right_shoulder_roll_link",
+    "right_elbow_link",
+    "left_wrist_pitch_link",
+    "right_wrist_pitch_link"
+  ],
+  "onnx": {
+    "file": "model_18000_play_full.onnx",
+    "opset_version": 18,
+    "batching": "fixed_batch_1"
+  },
+  "model_role": "complete_deterministic_play_policy",
+  "opset_version": 18,
+  "source_checkpoints": {
+    "encoder": "logs/new2/g1_latent_instinct_terrain_depth_reference808_frozen_decoder_estimator_spv52_dr/2026-08-12_07-59-59_latent_rl_reference808_depth_command_frozen_decoder_estimator/model_18000.pt",
+    "decoder": "logs/new2/g1_latent_distillation_v4_reference382_robot808_estimator_sp_teacher/2026-08-11_12-25-35_latent_distill_g1_reference382_robot808_estimator_2gpu_16384/model_18000.pt",
+    "encoder_iteration": 18000,
+    "decoder_iteration": 18000
+  },
+  "input_layout": [
+    {
+      "name": "proprio_without_estimates",
+      "offset": 0,
+      "size": 805
+    },
+    {
+      "name": "spv5_2_estimator_history_6100",
+      "offset": 805,
+      "size": 6100
+    },
+    {
+      "name": "velocity_command",
+      "offset": 6905,
+      "size": 3
+    },
+    {
+      "name": "depth_image",
+      "offset": 6908,
+      "size": 576,
+      "tensor_shape": [
+        1,
+        1,
+        18,
+        32
+      ],
+      "flatten_order": "NCHW"
+    }
+  ],
+  "network_pipeline": [
+    {
+      "name": "spv5_2_height_contact_estimator",
+      "input": "spv5_2_estimator_history_6100",
+      "input_size": 6100,
+      "outputs": [
+        "root_height_estimate",
+        "foot_contact_probabilities"
+      ],
+      "output_size": 3,
+      "history_normalization_embedded": true
+    },
+    {
+      "name": "terrain_latent_actor_encoder",
+      "inputs": [
+        "estimated_proprio_808",
+        "velocity_command",
+        "depth_image"
+      ],
+      "outputs": [
+        "latent_action"
+      ],
+      "latent_dimension": 64,
+      "latent_clip": [
+        -15.0,
+        15.0
+      ],
+      "observation_normalization_embedded": true,
+      "depth_cnn_and_spatial_softmax_embedded": true
+    },
+    {
+      "name": "frozen_latent_decoder",
+      "inputs": [
+        "estimated_proprio_808",
+        "latent_action_64"
+      ],
+      "input_size": 872,
+      "outputs": [
+        "action"
+      ],
+      "output_size": 29,
+      "input_normalization_embedded": true
+    }
+  ],
+  "estimator": {
+    "included_in_onnx": true,
+    "history_dimension": 6100,
+    "materialized_proprio_dimension": 808,
+    "materialization": "proprio[:805] + estimated_height + sigmoid(contact_logits)"
+  }
+}
