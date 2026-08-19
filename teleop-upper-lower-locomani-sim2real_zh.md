@@ -1,6 +1,7 @@
 # teleop-upper-lower-locomani 真机启动与操作
 
 本文只描述已经通过 sim2sim 的新任务。原 `deploy.py`、原 PICO 端口和原 `g1_bridge.yaml` 均未改变。
+通用机载拓扑、ARM64 安装和任务状态矩阵见 [G1 机载部署总说明](onboard-deployment_zh.md)。
 
 ## 1. 已确认的部署合同
 
@@ -352,3 +353,82 @@ ssh "${ROBOT_SSH}" \
 - 真机任务会主动退出，但不再自动发送 damping；
 - 检查 `G1_NET`、DDS LowState 和 UDP 端口；
 - 排除原因后按完整顺序重启 bridge 与任务。
+
+## 10. G1 全机载部署（实验性）
+
+第 4 节是当前明确记录的真机流程：PICO 重定向、策略和 bridge 在策略服务器运行，G1 机载侧只
+运行 D435i 发送端。把所有进程迁移到 G1 在代码和 localhost 地址上是可行的，但尚未完成
+“XR 服务 + 重定向 + D435i + 三个 ONNX session + DDS bridge”并发负载和真机闭环验证，因此
+本节只能作为实验性机载流程，不能宣称与第 4 节具有相同验证等级。
+
+### 10.1 首次准备
+
+1. 在 G1 上保留第 2 节的独立 `g1-camera-stream` Python 3.12 环境。
+2. 把完整主仓库复制到 G1，在 `<repo>/sim2real` 执行 `uv sync`，随后执行
+   `bash install_xrobottoolkit_sdk.sh`。
+3. 安装并验证 XRoboToolkit ARM64/headless PC Service；PICO 客户端连接 G1 无线 IP。
+4. 确认 `lower.onnx`、`upper.onnx` 以及所选 whole-body checkpoint 全部存在。
+5. 在 G1 上重新编译专用 bridge：
+
+   ```bash
+   cd <repo>/g1_sim2real
+   G1_BRIDGE_BUILD_DIR=build_locomani_onboard bash scripts/build.sh
+   ```
+
+不要复用外部 x86-64 策略机产生的 build 目录。全机载时
+`teleop-upper-lower-locomani-real.yaml` 的深度地址保持 `tcp://127.0.0.1:28811`，PICO ZMQ
+保持 `127.0.0.1:28701-28703`，策略/bridge UDP 保持 `127.0.0.1:55001-55002`。
+
+### 10.2 机载启动顺序
+
+终端 1：
+
+```bash
+cd /opt/apps/roboticsservice
+bash runService.sh
+```
+
+终端 2，启动本机 D435i；多相机时追加 `--serial-number`：
+
+```bash
+cd /home/unitree/g1-camera-stream
+taskset -c 0 .venv/bin/python depth_camera_sender.py
+```
+
+终端 3，使用只绑定回环地址的 PICO 服务：
+
+```bash
+cd <repo>/sim2real
+taskset -c 1 bash scripts/run_pico_server.sh
+```
+
+终端 4：
+
+```bash
+cd <repo>/g1_sim2real
+G1_NET=eth0 \
+G1_BRIDGE_BUILD_DIR=build_locomani_onboard \
+G1_BRIDGE_CONFIG=config/g1_bridge_teleop_upper_lower_locomani.yaml \
+taskset -c 2-3 bash scripts/run_bridge.sh
+```
+
+终端 5，首次使用 HEFT，并直接采用任务 YAML 的 localhost 深度地址：
+
+```bash
+cd <repo>/sim2real
+taskset -c 4-7 uv run src/teleop_upper_lower_locomani.py \
+  --target real \
+  --whole-body-policy heft \
+  --terrain-class 1
+```
+
+只有在 SPV5-2 已完成相同 sim2sim 和吊装验证后，才把 `--whole-body-policy` 改为 `spv5_2`。
+全机载时不再设置 `ROBOT_IP`，也不再传 `--depth-connect tcp://<外部IP>:28811`。
+
+### 10.3 验收与回退
+
+按第 5 节进入控制前，必须确认 PICO frame age、D435i frame age、bridge state interval 和策略
+周期均稳定。若持续出现 `pico_stale`、`camera/depth_stale`、`No bridge state for 1s`、明显周期
+抖动或机载过热，应立即停止并退回第 4 节外部策略服务器方案；不要放宽 0.25 秒超时掩盖负载
+不足。专用 bridge 的命令超时动作仍是 warn-only，机载部署不会改变这一安全边界，实体遥控器和
+硬件急停必须始终可用。

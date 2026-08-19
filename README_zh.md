@@ -16,6 +16,7 @@
 本仓库不包含训练代码和数据集生成代码，也不包含 L7 实机底层桥接程序。
 
 Dual-Teacher 的完整启动顺序见 [Dual-Teacher sim2sim / sim2real 部署说明](dual-teacher-deployment_zh.md)。
+所有任务的机载适用边界、公共安装和通信拓扑见 [G1 机载部署总说明](onboard-deployment_zh.md)。
 
 ## 目录结构
 
@@ -46,12 +47,14 @@ uv sync
 
 除非单独说明，后续 Python 命令都应在 `<repo>/sim2real` 下执行。支持的机器人参数为 `g1` 和 `l7`。
 
-## 快速开始：SPV5-1 + IsaacLab/Sonic motion
+## SPV5-1 + IsaacLab/Sonic motion（需要补 checkpoint）
 
-仓库中的 `config/g1/tracking_spv5_1.yaml` 已经直接配置好当前 SPV5-1 checkpoint 和三条内置 motion，无需复制配置文件。关键配置如下：
+仓库中的 `config/g1/tracking_spv5_1.yaml` 已提供 SPV5-1 的观测、关节、PD、motion 和 VR
+通信合同，但当前 checkout **不包含** `config/g1/ckpts/G1_SPV5_1/policy.onnx` 与同名 JSON
+sidecar。必须先从同一个导出目录复制完整 checkpoint，才能执行本节命令。关键配置为：
 
 ```yaml
-policy_path: "/home/lenovo/workspace/UNICTL/SP_Tracking/logs/ckpts/0720/policy.onnx"
+policy_path: "ckpts/G1_SPV5_1/policy.onnx"
 actor_profile: "spv5_1"
 use_policy_metadata: true
 
@@ -66,16 +69,8 @@ motion_source:
     port: 28562
 
 motions:
-  - name: "jumps1_subject1"
-    path: "../../../motion/jumps1_subject1.npz"
-    start: 0
-    end: -1
-  - name: "flip_360_001__A304"
-    path: "../../../motion/flip_360_001__A304.npz"
-    start: 0
-    end: -1
-  - name: "dance1_subject2_0_3945"
-    path: "../../../motion/dance1_subject2_0_3945.npz"
+  - name: "walk1_subject1"
+    path: "motions/walk1_subject1.npz"
     start: 0
     end: -1
 ```
@@ -111,11 +106,13 @@ uv run src/motion_select.py --robot g1 --tracking-config tracking_spv5_1.yaml
 
 1. 保持 MuJoCo 窗口获得键盘焦点，按 `s`，机器人从零力矩状态移动到默认姿态。
 2. 等待默认姿态过渡完成，按 `a` 进入 tracking policy。
-3. 在 motion 选择器中输入 `flip_360_001__A304`，或输入对应序号。
+3. 在 motion 选择器中输入仓库内可解析的 `walk1_subject1`，或输入对应序号；使用其他
+   IsaacLab/Sonic motion 前先确认其路径在当前主机存在。
 4. motion 执行结束后，如需切换动作，先选择 `default`，再选择下一个非默认动作。
 5. 在 MuJoCo 窗口按 `x` 停止控制。
 
-上述原始文件已直接完成回归测试：motion 被识别为 358 帧 IsaacLab/Sonic 数据，ONNX 输入/输出维度为 8199/29，运行时不需要转换 NPZ，也不需要 `/tmp` metadata 兼容配置。
+仓库自动化测试覆盖 SPV5-1 的 8199 维观测合同、metadata fallback、IsaacLab/Sonic 重排和
+`tau` 语义；这不代表当前缺失的外部 checkpoint 已在本 checkout 中完成前向或真机验证。
 
 ## Actor 与 checkpoint 配置
 
@@ -146,6 +143,10 @@ sim2real/config/g1/ckpts/G1_SPV5_2/
 ```
 
 也可以直接在 YAML 中把 `policy_path` 设置为绝对路径。运行时会检查 actor profile 与 ONNX 输入宽度是否匹配。
+
+当前 checkout 已包含默认 PMG、compliance 和 SPV5-2 所引用的模型；Dual-Teacher、MJLab
+locomani 模型也在各自任务目录中。`tracking_wbteleop.yaml` 和 `tracking_spv5_1.yaml` 指向的
+专用 checkpoint 目录尚未随仓库提供，复制到其他主机或机载计算机时必须单独补齐。
 
 ### 旧版 SPV5-1 metadata
 
@@ -355,41 +356,59 @@ G1_NET=enp3s0 bash scripts/run_bridge.sh
 
 ```bash
 cd <repo>/sim2real
-uv run src/deploy.py --robot g1 --tracking-config tracking_spv5_1.yaml
+uv run src/deploy.py --robot g1
 ```
 
 UDP 模式在另一个终端启动相同 tracking 配置的 motion 选择器。VR 模式应先启动遥操作桥。
 
 ### G1 机载运行
 
-机载部署需要把以下两个目录复制到 G1 机载计算机：
+完整流程和任务状态矩阵见 [G1 机载部署总说明](onboard-deployment_zh.md)。通用 tracking + PICO
+机载部署不需要外部策略主机，但仍需要 PICO、trackers、G1 遥控器以及 PICO 到 G1 的无线局域网。
+先把以下两个目录和所选 checkpoint 复制到 G1：
 
 - `sim2real/`：Python 策略运行时。
 - `g1_sim2real/`：C++ 底层桥。
 
-机载网卡通常使用 `eth0`：
+在 G1 上执行 `uv sync`；使用 PICO 时还需安装 ARM64 XRoboToolkit PC Service，并在 `uv sync`
+之后运行 `sim2real/install_xrobottoolkit_sdk.sh`。已有 build 目录可能来自 x86-64，必须在 G1 上
+重新编译：
 
 ```bash
 cd <repo>/g1_sim2real
-G1_NET=eth0 bash scripts/run_bridge.sh
+G1_BRIDGE_BUILD_DIR=build_onboard bash scripts/build.sh
 ```
 
-G1 机载 CPU 性能有限，建议把不同进程绑定到不同核心：
+VR 模式不要覆盖原始 UDP 配置；复制一个 checkpoint 完整的 tracking YAML，例如默认 PMG：
 
 ```bash
-# 终端 1：VR 遥操作桥
 cd <repo>/sim2real
-taskset -c 1 uv run teleop/serve_xrobot_teleop.py --robot g1
+cp config/g1/tracking.yaml config/g1/tracking_onboard_vr.yaml
+```
 
-# 终端 2：底层桥
+将新文件的 `motion_source.type` 改为 `vr`，保留三条 ZMQ 地址为 `127.0.0.1`。机载 CPU
+性能有限，建议按下列顺序和核心分配启动：
+
+```bash
+# 终端 1：先启动 /opt/apps/roboticsservice/runService.sh，PICO 连接 G1 无线 IP
+
+# 终端 2：仅绑定本机回环的 VR 遥操作桥
+cd <repo>/sim2real
+taskset -c 1 bash scripts/run_pico_server.sh
+
+# 终端 3：底层桥；eth0 是 DDS 网卡名，不是 IP
 cd <repo>/g1_sim2real
-G1_NET=eth0 taskset -c 2-3 bash scripts/run_bridge.sh
+G1_NET=eth0 G1_BRIDGE_BUILD_DIR=build_onboard \
+  taskset -c 2-3 bash scripts/run_bridge.sh
 
-# 终端 3：策略推理
+# 终端 4：策略推理
 cd <repo>/sim2real
 taskset -c 4-7 uv run src/deploy.py --robot g1 --no-record \
-  --tracking-config tracking_spv5_1.yaml
+  --tracking-config tracking_onboard_vr.yaml
 ```
+
+仓库未提供 systemd 开机自启或进程监督配置；不使用外部计算主机不等于已经实现无人值守启动。
+Dual-Teacher、upper/lower locomani 和 TAP—terrain 的机载命令与验证边界见各自任务文档。
 
 ### 实机安全与启动顺序
 

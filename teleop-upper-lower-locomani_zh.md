@@ -7,6 +7,10 @@
 
 右手 B 只负责在上述两种模式间切换。HEFT 和 SPV5-2 不能在运行中互相切换，必须在启动任务时选择。
 
+本文主体是 sim2sim 手册。真机和实验性全机载流程见
+[teleop-upper-lower-locomani 真机启动与操作](teleop-upper-lower-locomani-sim2real_zh.md)，通用
+机载拓扑与各任务成熟度见 [G1 机载部署总说明](onboard-deployment_zh.md)。
+
 ## 1. 当前实现与操作边界
 
 - 仅支持 G1。
@@ -610,3 +614,24 @@ PICO 左摇杆 Y：控制楼梯前进
 PICO 右手控制器：再次按 B 返回全身模式
 PICO 左手控制器：按 X 发送 damping 并结束高层任务
 ```
+
+## 14. G1 机载实机部署入口
+
+机载实机不运行本页的 MuJoCo `sim2sim.py` 和仿真 `depth_camera.py`。其进程替换关系为：
+
+| 本页 sim2sim 组件 | 机载实机组件 |
+| --- | --- |
+| `sim2sim.py` | `g1_sim2real/g1_udp_bridge`，通过 `G1_NET=eth0` 连接 DDS |
+| 仿真 `depth_camera.py` | G1 上独立 `g1-camera-stream/depth_camera_sender.py`，端口 28811 |
+| 工作站 PICO 服务 | G1 ARM64 XRoboToolkit PC Service + `scripts/run_pico_server.sh` |
+| 仿真 task | `teleop_upper_lower_locomani.py --target real` |
+
+全机载时 XR 服务、D435i、PICO 重定向、bridge 和策略全部运行在 G1，PICO 只通过无线局域网
+连接 G1。ZMQ `28701-28703`、深度 `28811` 和 UDP `55001/55002` 均使用 localhost；不再填写
+外部策略机 IP。推荐的核心起始分配为：D435i `0`、PICO 重定向 `1`、bridge `2-3`、策略
+`4-7`。
+
+当前该组合尚未完成机载并发负载和真机闭环验证，不能从本页 sim2sim 结果推断全机载可用。
+首次部署、完整五终端命令、验收和回退条件必须按
+[真机手册第 10 节](teleop-upper-lower-locomani-sim2real_zh.md) 执行；出现持续 PICO/深度 stale、
+bridge state timeout 或控制周期抖动时，应退回外部策略服务器方案。

@@ -9,6 +9,7 @@ ONNX 内部的 estimator、深度编码器或 decoder。
 当前状态：sim2sim 的模型加载、深度链路、相机外参、ONNX 前向和 A 键原子接管已经通过自动化
 测试与同模型物理闭环验证；sim2real 接口已经实现，但该 checkpoint 尚未完成 D435i/G1 实机
 闭环验证。首次上机必须使用可靠吊架或保护绳，并确保操作者可立即触发实体停止装置。
+通用机载拓扑、ARM64 编译和各任务状态矩阵见 [G1 机载部署总说明](onboard-deployment_zh.md)。
 
 ## 1. 部署合同
 
@@ -69,6 +70,13 @@ checkpoint 当前位于仓库外的同级目录：
 ```text
 /home/lenovo/workspace/UNICTL/terrain_bfm_ckpts/model_18000_play_full.onnx
 /home/lenovo/workspace/UNICTL/terrain_bfm_ckpts/model_18000_play_full.json
+```
+
+当前仓库还保留了一份同 SHA-256 的可移植副本：
+
+```text
+ckpts/0818_terrain/model_18000_play_full.onnx
+ckpts/0818_terrain/model_18000_play_full.json
 ```
 
 策略配置使用相对路径访问这两个文件。移动仓库或在另一台策略计算机部署时，必须保持相同目录
@@ -445,3 +453,69 @@ TAP 仿真采用按住生效、松开回零的虚拟摇杆。无运动键按下�
 
 尚未确认：真实 D435i 的安装误差、视场角误差、网络时延分布、真机力矩估计分布，以及该
 checkpoint 在真实坡道上的闭环稳定性。完成吊装低速测试前，不应将本任务标记为真机部署已验证。
+
+## 11. G1 全机载部署（实验性）
+
+TAP—terrain 不使用 PICO，可以把 D435i 发送端、TAP 策略和 G1 bridge 全部放到 G1 机载
+计算机。此时实时闭环不需要外部主机，深度 ZMQ 和策略/bridge UDP 都使用 `127.0.0.1`。当前
+已确认的是各组件支持这种寻址方式；尚未确认 D435i、ONNX 推理和 DDS bridge 并发时能在目标
+G1 上持续满足 50 Hz，也尚未完成全机载真机闭环，因此本节不能替代前述已实现的外部策略机流程。
+
+### 11.1 首次准备
+
+1. 按第 5.3 节在 G1 上准备独立 `g1-camera-stream` Python 3.12 环境和源码构建的
+   `pyrealsense2`。
+2. 把完整仓库复制到 G1，在主仓库 `sim2real/` 中执行 `uv sync`。
+3. 在 G1 上重新编译 bridge：
+
+   ```bash
+   cd <repo>/g1_sim2real
+   G1_BRIDGE_BUILD_DIR=build_tap_onboard bash scripts/build.sh
+   ```
+
+4. 选择一种 checkpoint 布局：保持现有 `tap-terrain-policy.yaml` 不变时，在仓库同级创建
+   `terrain_bfm_ckpts/` 并放入 ONNX/JSON；或者使用仓库内副本，把
+   `sim2real/config/g1/tap-terrain-policy.yaml` 的路径改为：
+
+   ```yaml
+   policy_path: "../../../ckpts/0818_terrain/model_18000_play_full.onnx"
+   ```
+
+5. 使用本文第 2 节 SHA-256 校验 ONNX 和 JSON，不能只复制 ONNX。
+
+### 11.2 机载启动顺序
+
+终端 1，启动本机 D435i 发送端。多相机时追加 `--serial-number`：
+
+```bash
+cd /home/unitree/g1-camera-stream
+taskset -c 0-1 .venv/bin/python depth_camera_sender.py
+```
+
+终端 2，启动机载 bridge；`eth0` 是 DDS 网卡名，不是 IP：
+
+```bash
+cd <repo>/g1_sim2real
+G1_NET=eth0 \
+G1_BRIDGE_BUILD_DIR=build_tap_onboard \
+G1_BRIDGE_CONFIG=config/g1_bridge.yaml \
+taskset -c 2-3 bash scripts/run_bridge.sh
+```
+
+终端 3，策略直接使用 `tap-terrain-real.yaml` 中的本机深度地址
+`tcp://127.0.0.1:28811`：
+
+```bash
+cd <repo>/sim2real
+taskset -c 4-7 uv run src/tap_terrain.py --target real
+```
+
+首次排查可追加 `--no-record` 降低 I/O；完成周期稳定性验证后，正式吊装测试应恢复记录。不要再
+传入外部 `${ROBOT_IP}:28811`，也不需要 XRoboToolkit 或 `serve_xrobot_teleop.py`。
+
+### 11.3 机载验收与回退条件
+
+进入控制前必须同时确认：D435i 稳定输出 `640x360@30`、策略显示 `depth ready`、bridge 持续
+提供 `tau_latest`、控制周期满足 50 Hz。持续出现 `depth_stale`、bridge state timeout、策略周期
+抖动或机载温度/负载异常时，应停止任务并退回第 6 节外部策略机方案；不要放宽 0.25 秒深度超时
+来掩盖性能不足。全机载首次实机仍须使用吊架、低速正向命令和 G1 实体停止装置。

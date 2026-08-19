@@ -168,7 +168,73 @@ uv run src/dual_teacher_adapter.py \
 
 停止时使用 G1 遥控器的 `select` 或现场配置的停止键进入停止/阻尼状态；异常时直接使用硬件急停。随后依次结束策略、底层桥和 PICO 服务。
 
-## 5. 按键速查
+## 5. G1 机载部署
+
+Dual-Teacher 的 Python 策略、PICO 重定向和 C++ bridge 可以同机放在 G1 机载计算机上；实时
+闭环不再需要外部策略主机。当前已确认的是代码、localhost 通信和 checkpoint 合同完整，尚未完成
+该组合在 G1 机载 CPU 上的持续 50 Hz 负载与真机闭环验证，因此首次使用仍应视为机载实验流程。
+公共拓扑、ARM64 安装和验收要求见 [G1 机载部署总说明](onboard-deployment_zh.md)。
+
+首次准备：
+
+1. 把完整仓库复制到 G1；确认 `config/g1/ckpts/DualTeacher/model_30000.onnx` 存在。
+2. 在 `sim2real/` 执行 `uv sync`，随后执行 `bash install_xrobottoolkit_sdk.sh`。
+3. 安装并验证 XRoboToolkit ARM64/headless PC Service。
+4. 在 G1 上重新编译 bridge，不能复用 x86-64 build：
+
+   ```bash
+   cd <repo>/g1_sim2real
+   G1_BRIDGE_BUILD_DIR=build_onboard bash scripts/build.sh
+   ```
+
+5. 在 PICO XRoboToolkit 客户端中填写 G1 无线 IP并完成 tracker/controller 标定。
+
+机载启动使用四个终端。终端 1：
+
+```bash
+cd /opt/apps/roboticsservice
+bash runService.sh
+```
+
+终端 2，使用只绑定 `127.0.0.1` 的遥操作配置：
+
+```bash
+cd <repo>/sim2real
+taskset -c 1 bash scripts/run_pico_server.sh
+```
+
+终端 3：
+
+```bash
+cd <repo>/g1_sim2real
+G1_NET=eth0 \
+G1_BRIDGE_BUILD_DIR=build_onboard \
+G1_BRIDGE_CONFIG=config/g1_bridge.yaml \
+taskset -c 2-3 bash scripts/run_bridge.sh
+```
+
+终端 4：
+
+```bash
+cd <repo>/sim2real
+taskset -c 4-7 uv run src/dual_teacher_adapter.py \
+  --robot g1 \
+  --target real \
+  --task-config config/g1/dual-teacher-real.yaml \
+  --controller-config config/g1/controller.yaml \
+  --tracking-config tracking.yaml
+```
+
+Dual-Teacher adapter 会在进程内强制 tracking fallback 使用 VR motion source，因此不需要把
+`tracking.yaml` 的 `motion_source.type` 永久改成 `vr`。ZMQ 保持 `127.0.0.1:28701-28703`，
+策略与 bridge 的 UDP 保持 `127.0.0.1:55001-55002`，相机端口在当前 `motion` 模式下不使用。
+
+进入控制仍严格执行上一节顺序。机载验收还必须确认：持续运行没有 `pico_stale`；策略进程没有
+周期超时；tracking fallback 与 Dual-Teacher 双向切换均平滑；G1 实体 `select/stop` 与硬件急停
+可用。若机载负载导致持续 stale 或控制周期低于 50 Hz，应退回外部策略主机方案，不能通过放宽
+0.25 秒超时掩盖性能不足。
+
+## 6. 按键速查
 
 | 场景 | 按键 | 作用 |
 | --- | --- | --- |
@@ -179,7 +245,7 @@ uv run src/dual_teacher_adapter.py \
 | G1 遥控器 | `A` | 实机进入策略 |
 | PICO 右手控制器 | `A` | 启动或重新对齐 PICO 姿态流 |
 
-## 6. 常见问题
+## 7. 常见问题
 
 ### 一进入策略就向后倒
 

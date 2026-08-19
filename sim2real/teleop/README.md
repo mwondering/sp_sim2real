@@ -2,6 +2,8 @@
 
 Supplement for installing and validating realtime VR motion input.
 Runtime startup order and button usage are documented in the top-level `README.md`.
+The task-by-task onboard support matrix is in
+[`onboard-deployment_zh.md`](../../onboard-deployment_zh.md).
 
 Use this document when `sim2real/config/<robot>/tracking.yaml` has:
 
@@ -236,6 +238,71 @@ PY
 
 If body data is unavailable, check the PICO connection, tracker calibration, PC service status, and network route between the headset and host.
 
+## Complete G1 Onboard Runtime
+
+For a complete onboard deployment, the G1 computer runs XRoboToolkit PC
+Service, `serve_xrobot_teleop.py`, the Python ONNX controller, and
+`g1_udp_bridge`. The realtime loop no longer needs an external workstation;
+the PICO headset/trackers, G1 remote, and a low-latency LAN remain required.
+
+Before runtime:
+
+1. Copy `sim2real/`, `g1_sim2real/`, and the selected checkpoint to G1.
+2. Run `uv sync`, then `bash install_xrobottoolkit_sdk.sh` on G1.
+3. Build `g1_udp_bridge` again on G1 with an isolated build directory. Do not
+   reuse an x86-64 binary.
+4. Copy a tracking YAML whose checkpoint is present and set the copy's
+   `motion_source.type` to `vr`. Keep its ZMQ addresses at `127.0.0.1`.
+5. Configure the PICO XRoboToolkit client to connect to the G1 wireless IP.
+
+For example, use the included default PMG checkpoint:
+
+```bash
+cd <repo>/sim2real
+cp config/g1/tracking.yaml config/g1/tracking_onboard_vr.yaml
+# Edit tracking_onboard_vr.yaml: motion_source.type: "vr"
+
+cd <repo>/g1_sim2real
+G1_BRIDGE_BUILD_DIR=build_onboard bash scripts/build.sh
+```
+
+Start the four runtime components in this order:
+
+```bash
+# Terminal 1: XRoboToolkit PC Service
+cd /opt/apps/roboticsservice
+bash runService.sh
+
+# Terminal 2: loopback-only retarget server
+cd <repo>/sim2real
+taskset -c 1 bash scripts/run_pico_server.sh
+
+# Terminal 3: G1 DDS/UDP bridge; eth0 is the DDS interface name
+cd <repo>/g1_sim2real
+G1_NET=eth0 G1_BRIDGE_BUILD_DIR=build_onboard \
+  taskset -c 2-3 bash scripts/run_bridge.sh
+
+# Terminal 4: policy inference
+cd <repo>/sim2real
+taskset -c 4-7 uv run src/deploy.py --robot g1 --no-record \
+  --tracking-config tracking_onboard_vr.yaml
+```
+
+Use `scripts/run_pico_server.sh` onboard because it selects
+`retarget/teleop-server.yaml`, whose ZMQ sockets bind only to `127.0.0.1`.
+Calling `serve_xrobot_teleop.py --robot g1` without `--config` uses
+`retarget/teleop.yaml`, which binds to `tcp://*`; it works locally but also
+exposes ports `28701-28703` on the Wi-Fi and DDS interfaces.
+
+Validate the runtime before enabling the policy: the server must print all
+three endpoints, the controller must print `VRMotionSource` connected, bridge
+state must remain current, and PICO frame age must not become stale. Use the G1
+remote `start`, then `A`, and only then press PICO right-hand `A`. Stop with the
+G1 remote or hardware emergency stop. This repository does not provide systemd
+autostart/process supervision, and task-specific adapters have different
+onboard validation status; follow their deployment guides rather than assuming
+the generic tracking result applies to every task.
+
 ## Connection Troubleshooting Checklist
 
 When the PICO cannot connect or body data stays unavailable, check:
@@ -263,6 +330,8 @@ uv run python serve_xrobot_teleop.py --robot g1
 
 Use `--robot l7` for L7.
 Defaults come from `../config/<robot>/retarget/teleop.yaml`.
+For onboard deployment, use `cd <repo>/sim2real && bash scripts/run_pico_server.sh`
+instead so the sockets are loopback-only.
 
 Keep a stable standing posture during startup so the retarget stack can estimate root height.
 
@@ -288,11 +357,14 @@ For the full sim2sim/sim2real startup order and XR button usage, return to the t
 
 ## ZMQ Endpoints
 
-Default endpoints:
+Default `retarget/teleop.yaml` bind endpoints:
 
 - request: `tcp://*:28701`
 - reply: `tcp://*:28702`
 - controller buttons: `tcp://*:28703`
+
+The onboard `retarget/teleop-server.yaml` binds the same ports to
+`tcp://127.0.0.1` instead. `src/deploy.py` connects to loopback in both cases.
 
 `src/deploy.py` reads these addresses from `config/<robot>/tracking.yaml` under `motion_source.vr`.
 

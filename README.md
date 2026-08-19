@@ -15,6 +15,8 @@ This branch supports:
 
 It does not include training code or dataset generation code.
 The L7 hardware sim2real bridge is not part of this branch.
+For the task-by-task onboard support matrix and complete Chinese setup, see
+[G1 onboard deployment](onboard-deployment_zh.md).
 
 ## Directory Layout
 
@@ -85,6 +87,12 @@ sim2real/config/g1/ckpts/G1_WBTeleop/     # WBTeleop actor
 sim2real/config/g1/ckpts/G1_SPV5_1/      # SPV5-1 actor
 sim2real/config/g1/ckpts/G1_SPV5_2/      # SPV5-2 actor
 ```
+
+The current checkout does not contain the dedicated `G1_WBTeleop` or
+`G1_SPV5_1` checkpoint directories. Their profile YAML files define the
+runtime contract, but those two actors cannot start until their ONNX, JSON
+sidecar, and optional `.onnx.data` are copied into place. The current SPV5-2
+profile points to a checkpoint that is present in this repository.
 
 `policy.json` normally supplies the canonical joint order, action scale,
 default pose, stiffness, and damping used during training. The SPV5 profiles
@@ -282,6 +290,10 @@ uv run src/deploy.py --robot g1 --tracking-config tracking_spv5_1.yaml
 uv run src/deploy.py --robot g1 --tracking-config tracking_spv5_2.yaml
 ```
 
+The current checkout contains the models referenced by the default PMG,
+compliance, and SPV5-2 profiles. Copy the missing WBTeleop or SPV5-1 export
+before using the corresponding command above.
+
 Use the same `--tracking-config` value with `motion_select.py`. All actor
 profiles support UDP motion playback and VR input. SPV5-1 consumes the
 control-window average `tau`, while SPV5-2 consumes the newest `tau_latest`
@@ -337,38 +349,73 @@ If you need onboard inference on G1, copy both runtime components to the G1 onbo
 - `sim2real/`: Python policy runtime
 - `g1_sim2real/`: G1 C++ bridge
 
-Then run both the policy runtime and bridge on G1.
-In that setup, use the onboard Ethernet interface:
+Then run the XR service, teleop retargeting, policy runtime, and bridge on G1.
+The realtime loop no longer needs an external workstation, but PICO teleop
+still requires the headset, trackers, G1 remote, and a reachable low-latency
+LAN. Install the ARM64 XRoboToolkit PC service and Python binding as described
+in `sim2real/teleop/README.md`.
+
+Build the bridge again on G1; an existing binary or build directory may be
+x86-64 and must not be reused:
 
 ```bash
 cd <repo>/g1_sim2real
-G1_NET=eth0 bash scripts/run_bridge.sh
+G1_BRIDGE_BUILD_DIR=build_onboard bash scripts/build.sh
+```
+
+For VR, copy a profile whose checkpoint is present and change only the copied
+file's `motion_source.type` to `vr`. This default-PMG example preserves the
+original UDP profile:
+
+```bash
+cd <repo>/sim2real
+cp config/g1/tracking.yaml config/g1/tracking_onboard_vr.yaml
+# Edit tracking_onboard_vr.yaml: motion_source.type: "vr"
 ```
 
 The G1 onboard CPU is relatively weak, so it is recommended to pin the runtime
 processes to separate CPU cores. By default, the policy runtime pins ONNX
 inference to cores `4-7`. The following split has worked well:
 
-Terminal 1 starts the VR teleop bridge:
+Terminal 1 starts XRoboToolkit PC Service:
+
+```bash
+cd /opt/apps/roboticsservice
+bash runService.sh
+```
+
+Connect the PICO client to the G1 wireless IP and finish tracker/controller
+calibration. Terminal 2 starts the loopback-only VR teleop bridge:
 
 ```bash
 cd <repo>/sim2real
-taskset -c 1 uv run teleop/serve_xrobot_teleop.py --robot g1
+taskset -c 1 bash scripts/run_pico_server.sh
 ```
 
-Terminal 2 starts the G1 low-level bridge:
+Terminal 3 starts the G1 low-level bridge. `eth0` is the DDS interface name,
+not an IP address:
 
 ```bash
 cd <repo>/g1_sim2real
-G1_NET=eth0 taskset -c 2-3 bash scripts/run_bridge.sh
+G1_NET=eth0 G1_BRIDGE_BUILD_DIR=build_onboard \
+  taskset -c 2-3 bash scripts/run_bridge.sh
 ```
 
-Terminal 3 starts the Python policy controller:
+Terminal 4 starts the Python policy controller:
 
 ```bash
 cd <repo>/sim2real
-taskset -c 4-7 uv run src/deploy.py --robot g1 --no-record
+taskset -c 4-7 uv run src/deploy.py --robot g1 --no-record \
+  --tracking-config tracking_onboard_vr.yaml
 ```
+
+Keep ZMQ on `127.0.0.1:28701-28703` and policy/bridge UDP on
+`127.0.0.1:55001-55002`; no external policy-host IP is required. This
+repository does not provide systemd units or process supervision, so another
+machine may still be used for SSH startup and log inspection without
+participating in the realtime loop. Dual-Teacher, upper/lower locomani, and
+TAP—terrain have task-specific onboard maturity and commands in their own
+guides; the generic tracking result must not be generalized to those tasks.
 
 ### G1 Runtime Startup
 
