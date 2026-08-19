@@ -542,6 +542,11 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--controller-config", type=Path, default=None)
     parser.add_argument("--depth-connect", default=None)
     parser.add_argument(
+        "--terrain-only",
+        action="store_true",
+        help="Disable the optional PICO teleop policy and run terrain only",
+    )
+    parser.add_argument(
         "--velocity",
         type=float,
         nargs=3,
@@ -563,6 +568,12 @@ def main(argv=None) -> None:
         args.task_config = SIM2REAL_ROOT / "config/g1" / config_name
     task_config_path = args.task_config.expanduser().resolve()
     task_config = _load_task_config(task_config_path)
+    if args.terrain_only:
+        switch_config = task_config.get("policy_switch", {})
+        if not isinstance(switch_config, Mapping):
+            raise ValueError("policy_switch must be a mapping")
+        task_config["policy_switch"] = dict(switch_config)
+        task_config["policy_switch"]["enabled"] = False
     configured_target = str(task_config.get("target", ""))
     if configured_target != args.target:
         raise ValueError(
