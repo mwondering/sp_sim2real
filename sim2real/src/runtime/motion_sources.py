@@ -475,6 +475,17 @@ class VRMotionSource(MotionSourceBase):
         self.vr_low_watermark = int(vr_cfg["low_watermark"])
         self.vr_high_watermark = int(vr_cfg["high_watermark"])
         self.vr_inflight_lifetime_steps = int(vr_cfg["inflight_lifetime_steps"])
+        self.vr_start_button = str(
+            vr_cfg.get("start_button", "right_key_one")
+        ).strip()
+        self.vr_stop_button = str(
+            vr_cfg.get("stop_button", "left_key_one")
+        ).strip()
+        if (
+            self.vr_start_button
+            and self.vr_start_button == self.vr_stop_button
+        ):
+            raise ValueError("VR start_button and stop_button must differ")
         if self.vr_inflight_lifetime_steps < 0:
             raise ValueError("vr_inflight_lifetime_steps must be >= 0")
         if self.vr_high_watermark > 0 and self.vr_high_watermark < self.vr_low_watermark:
@@ -673,6 +684,34 @@ class VRMotionSource(MotionSourceBase):
             enable=1,
         )
 
+    def request_start(self) -> None:
+        """Start a fresh aligned VR reference session."""
+        self._vr_user_enabled = True
+        self._pending_start_request = True
+        self._req_inflight = False
+        self._req_inflight_steps_left = 0
+        self._vr_active = False
+        self._vr_align_ready = False
+        self._vr_in_transition = False
+        self._vr_transition_count = 0
+        if self._shared_store is not None:
+            self._shared_store.publish_control(active=False)
+        print("[VRMotionSource] VR start requested")
+
+    def request_stop(self) -> None:
+        """Stop requesting and consuming VR reference frames."""
+        self._vr_user_enabled = False
+        self._pending_start_request = False
+        self._req_inflight = False
+        self._req_inflight_steps_left = 0
+        self._vr_active = False
+        self._vr_align_ready = False
+        self._vr_in_transition = False
+        self._vr_transition_count = 0
+        if self._shared_store is not None:
+            self._shared_store.publish_control(active=False)
+        print("[VRMotionSource] VR stop requested")
+
     def _drain_control(self) -> None:
         if self._ctrl_sock is None:
             return
@@ -726,38 +765,24 @@ class VRMotionSource(MotionSourceBase):
         if latest_buttons is None:
             return
 
-        start_btn = bool(latest_buttons.get("right_key_one", False))
-        stop_btn = bool(latest_buttons.get("left_key_one", False))
+        start_btn = bool(
+            self.vr_start_button
+            and latest_buttons.get(self.vr_start_button, False)
+        )
+        stop_btn = bool(
+            self.vr_stop_button
+            and latest_buttons.get(self.vr_stop_button, False)
+        )
         start_rise = start_btn and (not self._prev_start_btn)
         stop_rise = stop_btn and (not self._prev_stop_btn)
         self._prev_start_btn = start_btn
         self._prev_stop_btn = stop_btn
 
         if stop_rise:
-            self._vr_user_enabled = False
-            self._pending_start_request = False
-            self._req_inflight = False
-            self._req_inflight_steps_left = 0
-            self._vr_active = False
-            self._vr_align_ready = False
-            self._vr_in_transition = False
-            self._vr_transition_count = 0
-            if self._shared_store is not None:
-                self._shared_store.publish_control(active=False)
-            print("[VRMotionSource] VR stop from control button")
+            self.request_stop()
 
         if start_rise:
-            self._vr_user_enabled = True
-            self._pending_start_request = True
-            self._req_inflight = False
-            self._req_inflight_steps_left = 0
-            self._vr_active = False
-            self._vr_align_ready = False
-            self._vr_in_transition = False
-            self._vr_transition_count = 0
-            if self._shared_store is not None:
-                self._shared_store.publish_control(active=False)
-            print("[VRMotionSource] VR start requested from control button")
+            self.request_start()
 
     def poll_control(self) -> None:
         """Drain controller input before the task computes its next command."""

@@ -19,6 +19,7 @@ from runtime.kinematics import quat_to_rot6d_wxyz
 from runtime.observation import (
     SPV51ActorObservation,
     SPV52ActorObservation,
+    TAPTeleopActorObservation,
     WBTeleopActorObservation,
 )
 from runtime.policy import TrackingPolicyRaw
@@ -94,6 +95,25 @@ class ActorProfileContractTests(unittest.TestCase):
         self.assertEqual(value.shape, (8199,))
         self.assertTrue(np.isfinite(value).all())
 
+    def test_tap_teleop_observation_contract(self):
+        policy = _FakePolicy("tap-teleop-policy.yaml")
+        observation = TAPTeleopActorObservation(policy)
+        observation.update()
+        value = observation.compute()
+
+        self.assertEqual(value.shape, (8809,))
+        self.assertTrue(np.isfinite(value).all())
+        np.testing.assert_array_equal(value[-4:], policy.controller.quat)
+
+        # Exported layout: reference[1900], latest proprio/key-body[805],
+        # estimator history[6100], root quaternion[4].
+        estimator_start = 1900 + 805
+        qpos_history = value[
+            estimator_start : estimator_start + 50 * 29
+        ].reshape(50, 29)
+        np.testing.assert_array_equal(qpos_history[:-1], 0.0)
+        np.testing.assert_allclose(qpos_history[-1], 0.01, atol=1.0e-7)
+
     def test_udp_state_payload_carries_torque(self):
         tau = np.arange(29, dtype=np.float32)
         tau_latest = tau + 0.5
@@ -145,6 +165,23 @@ class ActorProfileContractTests(unittest.TestCase):
 
         policy.onnx_input_name = "spv5_2_observation"
         policy._validate_policy_input_key()
+
+    def test_tap_teleop_profile_validates_multi_group_sidecar(self):
+        policy = object.__new__(TrackingPolicyRaw)
+        policy.actor_profile = "tap_teleop"
+        policy.module = SimpleNamespace(
+            in_keys=[
+                "spv5_2_reference",
+                "spv5_2_robot_5frame_estimator_808",
+                "robot_root_quat",
+            ]
+        )
+        policy.onnx_input_name = "observation"
+        policy._validate_policy_input_key()
+
+        policy.module.in_keys = ["spv5_2_observation"]
+        with self.assertRaisesRegex(ValueError, "tap_teleop"):
+            policy._validate_policy_input_key()
 
 
 if __name__ == "__main__":

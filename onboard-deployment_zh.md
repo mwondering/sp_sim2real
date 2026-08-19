@@ -11,8 +11,8 @@
 | --- | --- | --- | --- |
 | 通用 `deploy.py` tracking + PICO | 已有完整代码与启动链路 | PICO、trackers、G1 遥控器、Wi-Fi/LAN | 推荐作为首个机载验证任务 |
 | Dual-Teacher `motion` 模式 | 链路可同机运行，尚缺机载负载实测 | PICO、trackers、G1 遥控器、Wi-Fi/LAN | 不需要深度相机；adapter 会强制使用 VR motion source |
-| `teleop-upper-lower-locomani` | 实验性全机载流程，尚未验证时延和真机闭环 | PICO、trackers、D435i、G1 遥控器 | 当前已确认手册仍以外部策略服务器为主 |
-| TAP—terrain | 实验性全机载流程，尚未验证时延和真机闭环 | D435i、G1 遥控器 | 不使用 PICO；需把 terrain checkpoint 一并放到机载侧 |
+| `teleop-upper-lower-locomani` | 实验性全机载流程，尚未验证时延和真机闭环 | PICO、trackers、本地外接 D435i、G1 遥控器 | 当前已确认手册仍以外部策略服务器为主 |
+| TAP—terrain + 可切换 teleop | 实验性全机载流程，尚未验证时延和真机闭环 | 本地外接 D435i、G1 遥控器；teleop 时另需 PICO、trackers、Wi-Fi/LAN | 不使用宇树内置相机；默认预加载 `0818_terrain` 与 `0819_teleop`，两个 PICO primary 组合键双向切换 |
 
 任何“链路可同机运行”都不等价于对应 checkpoint 已通过真机验证。首次上机必须先完成 sim2sim，
 使用吊架或保护绳，并由操作者始终握住实体遥控器和硬件急停。
@@ -61,7 +61,7 @@ bridge 状态目标和策略命令目标都应使用回环地址，不需要填�
 ```
 
 检查所选 YAML 的 `policy_path`、任务 ONNX 和 JSON sidecar。当前仓库内默认 PMG、compliance、
-SPV5-2、Dual-Teacher 和 MJLab locomani checkpoint 可解析；`tracking_wbteleop.yaml` 与
+SPV5-2、TAP terrain/teleop、Dual-Teacher 和 MJLab locomani checkpoint 可解析；`tracking_wbteleop.yaml` 与
 `tracking_spv5_1.yaml` 指向的专用 checkpoint 目录当前未随仓库提供，不能直接照抄对应启动命令。
 
 ### 3.2 安装 Python 和 XR 依赖
@@ -83,7 +83,17 @@ bash install_xrobottoolkit_sdk.sh
 
 完整安装、ABI 风险和验证命令见 [`sim2real/teleop/README.md`](sim2real/teleop/README.md)。
 TAP—terrain 和 upper/lower locomani 的 D435i 发送端使用独立 `g1-camera-stream` 环境；不要把
-其 Python 3.12/`pyrealsense2` 环境与主策略的 Python 3.10 环境混用。
+其 Python 3.12/`pyrealsense2` 环境与主策略的 Python 3.10 环境混用。TAP 只运行 terrain 时
+不要求 XR 服务；需要切换到 `0819_teleop` 时，则必须同时完成本节的 PICO/XR 安装。这里的
+D435i 是通过 USB 接入的本地外接深度相机：相机分支按 `camera.yaml` 中的序列号直接读取其
+RealSense 内参和深度尺度，不能替换成宇树内置头部相机、其 `camera_info` 或图像 topic。
+
+TAP 的相机参数以任务配置为准：`640×360@30 Hz`、目标 FOV
+`89.041605°×57.9°`，相对 pelvis 位移
+`[0.125461581205,0.0197,-0.059520040551] m`，TAP `+X` 前向射线坐标系四元数
+`wxyz=[0.86601716,0.00377874,0.49999524,-0.00218165]`。机载启动前必须把实际 D435i 序列号写入
+`/home/unitree/g1-camera-stream/camera.yaml`，并使用
+`depth_camera_sender.py --config camera.yaml` 启动。
 
 ### 3.3 在 G1 上重新编译 bridge
 

@@ -1,0 +1,110 @@
+{
+  "format": "motion_tracking_sim2real_policy",
+  "run_name": "2026-08-19_05-33-02_ppo_spv52features1645_latent64_wae_mmd_multimotion_uniform",
+  "iteration": 1000,
+  "checkpoint": "model_1000.pt",
+  "in_keys": [
+    "spv5_2_reference",
+    "spv5_2_robot_5frame_estimator_808",
+    "robot_root_quat"
+  ],
+  "out_keys": [
+    "action"
+  ],
+  "in_shapes": [
+    [
+      [
+        1,
+        8809
+      ]
+    ]
+  ],
+  "num_actions": 29,
+  "onnx": {
+    "file": "model_1000_play_full.onnx",
+    "opset_version": 18,
+    "batching": "dynamic_batch"
+  },
+  "model_role": "complete_deterministic_play_policy",
+  "opset_version": 18,
+  "source_checkpoints": {
+    "policy": "/data_sjy/libin/Project_fold/Teleop_Terrain/logs/g1_teleop_spv52_multimotion_uniform/2026-08-19_05-33-02_ppo_spv52features1645_latent64_wae_mmd_multimotion_uniform/model_1000.pt",
+    "reference_reconstructor": "/data_zcy/wxy/SP_Tracking/logs/rsl_rl/g1_tracking/2026-07-26_15-53-51_SPTracking-G1-BFM-SPV5-2Actor-HEFTCritic-HEFTReward_8gpu_12288env_motion_data_correct/checkpoint_29000.pt",
+    "decoder": "/data_sjy/libin/Project_fold/tracking_bfm/logs/new2/g1_latent_distillation_v4_reference382_robot808_estimator_sp_teacher/2026-08-11_12-25-35_latent_distill_g1_reference382_robot808_estimator_2gpu_16384/model_18000.pt"
+  },
+  "input_layout": [
+    {
+      "name": "spv5_2_reference",
+      "offset": 0,
+      "size": 1900
+    },
+    {
+      "name": "proprio_without_estimates",
+      "offset": 1900,
+      "size": 805
+    },
+    {
+      "name": "spv5_2_estimator_history_6100",
+      "offset": 2705,
+      "size": 6100
+    },
+    {
+      "name": "robot_root_quat",
+      "offset": 8805,
+      "size": 4
+    }
+  ],
+  "network_pipeline": [
+    {
+      "name": "spv5_2_reference_reconstructor",
+      "input": "spv5_2_reference",
+      "input_size": 1900,
+      "outputs": [
+        "reconstructed_support"
+      ],
+      "output_size": 418,
+      "frozen": true
+    },
+    {
+      "name": "spv5_2_policy_feature_builder",
+      "outputs": [
+        "policy_features"
+      ],
+      "output_size": 1645
+    },
+    {
+      "name": "teleop_latent_actor_encoder",
+      "input": "policy_features",
+      "outputs": [
+        "latent_action"
+      ],
+      "latent_dimension": 64,
+      "latent_clip": [
+        -15,
+        15
+      ]
+    },
+    {
+      "name": "frozen_latent_decoder",
+      "input_size": 872,
+      "outputs": [
+        "action"
+      ],
+      "output_size": 29
+    }
+  ],
+  "estimator": {
+    "included_in_onnx": true,
+    "history_dimension": 6100,
+    "materialized_proprio_dimension": 808
+  },
+  "onnx_file": "/data_sjy/libin/Project_fold/Teleop_Terrain/logs/g1_teleop_spv52_multimotion_uniform/2026-08-19_05-33-02_ppo_spv52features1645_latent64_wae_mmd_multimotion_uniform/model_1000_play_full.onnx",
+  "input_names": [
+    "observation"
+  ],
+  "output_names": [
+    "action"
+  ],
+  "dynamic_batch": true,
+  "validation_max_abs_error": 6.198883056640625e-06
+}

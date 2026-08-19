@@ -22,7 +22,7 @@ from common.utils import DictToClass
 from depth_camera import DepthRayCamera
 from runtime.depth_pipeline import TAPTerrainDepthProcessor
 from runtime.observation import TAPTerrainActorObservation
-from runtime.policy import TAPTerrainPolicy
+from runtime.policy import TAPTerrainPolicy, TrackingPolicyRaw
 from deploy import Controller
 from tap_terrain import (
     TASK_NAME,
@@ -84,6 +84,86 @@ class _Subscriber:
 
 
 class TAPTerrainTests(unittest.TestCase):
+    def test_pico_combo_switch_is_fresh_edge_triggered(self):
+        controller = object.__new__(TAPTerrainController)
+        controller.switch_combo_buttons = (
+            "left_key_one",
+            "right_key_one",
+        )
+        controller.switch_freshness_timeout_s = 0.25
+        controller._switch_combo_was_pressed = False
+        released = SimpleNamespace(
+            buttons={"left_key_one": False, "right_key_one": False},
+            control_timestamp=10.0,
+        )
+        pressed = SimpleNamespace(
+            buttons={"left_key_one": True, "right_key_one": True},
+            control_timestamp=10.0,
+        )
+
+        self.assertTrue(controller._switch_combo_rising(pressed, now=10.1))
+        self.assertFalse(controller._switch_combo_rising(pressed, now=10.1))
+        self.assertFalse(controller._switch_combo_rising(released, now=10.1))
+        self.assertTrue(controller._switch_combo_rising(pressed, now=10.1))
+        self.assertFalse(controller._switch_combo_rising(released, now=10.1))
+        self.assertFalse(controller._switch_combo_rising(pressed, now=10.5))
+
+    def test_policy_switch_lifecycle_and_depth_guard(self):
+        events = []
+        source = SimpleNamespace(
+            request_start=lambda: events.append("vr_start")
+        )
+        terrain = SimpleNamespace(
+            fade_in=lambda: events.append("terrain_in"),
+            fade_out=lambda: events.append("terrain_out"),
+        )
+        teleop = SimpleNamespace(
+            fade_in=lambda: events.append("teleop_in"),
+            fade_out=lambda: events.append("teleop_out"),
+            source=source,
+        )
+        depth_result = [np.ones((1, 18, 32), dtype=np.float32), "ready"]
+        controller = object.__new__(TAPTerrainController)
+        controller.switch_enabled = True
+        controller.active_policy_name = "terrain"
+        controller.current_policy = terrain
+        controller.policies = {"tracking": terrain, "teleop": teleop}
+        controller.tap_inputs = SimpleNamespace(
+            read_depth=lambda: tuple(depth_result)
+        )
+        controller._terrain_warmed_steps = 3
+        controller.cmd_q = np.ones(29, dtype=np.float32)
+        controller.cmd_kp = np.ones(29, dtype=np.float32)
+        controller.cmd_kd = np.ones(29, dtype=np.float32)
+        controller._switch_blend_q = np.zeros(29, dtype=np.float32)
+        controller._switch_blend_kp = np.zeros(29, dtype=np.float32)
+        controller._switch_blend_kd = np.zeros(29, dtype=np.float32)
+        controller.switch_blend_steps = 50
+        controller._switch_blend_step = 10
+        controller._rotate_policy_recorder = lambda: events.append("recorder")
+
+        self.assertTrue(controller._switch_policy())
+        self.assertEqual(controller.active_policy_name, "teleop")
+        self.assertIs(controller.current_policy, teleop)
+        self.assertEqual(
+            events,
+            ["terrain_out", "teleop_in", "vr_start", "recorder"],
+        )
+        np.testing.assert_array_equal(controller._switch_blend_q, 1.0)
+
+        depth_result[:] = [None, "depth_stale(age=0.300s)"]
+        self.assertFalse(controller._switch_policy())
+        self.assertEqual(controller.active_policy_name, "teleop")
+
+        depth_result[:] = [
+            np.ones((1, 18, 32), dtype=np.float32),
+            "ready",
+        ]
+        self.assertTrue(controller._switch_policy())
+        self.assertEqual(controller.active_policy_name, "terrain")
+        self.assertIs(controller.current_policy, terrain)
+        self.assertEqual(controller._terrain_warmed_steps, 0)
+
     def test_a_selection_does_not_enable_before_first_policy_target(self):
         sent_enables = []
         selected_policy = SimpleNamespace(fade_in=lambda: None)
@@ -124,6 +204,9 @@ class TAPTerrainTests(unittest.TestCase):
 
         controller = object.__new__(TAPTerrainController)
         controller.policies = {"tracking": policy}
+        controller.current_policy = policy
+        controller.active_policy_name = "terrain"
+        controller.switch_enabled = False
         controller._start_policy_recorder = lambda: None
         controller.dof_size = 29
         controller.default_qpos = np.zeros(29, dtype=np.float32)
@@ -135,6 +218,7 @@ class TAPTerrainTests(unittest.TestCase):
         controller.cmd_kd = np.zeros(29, dtype=np.float32)
         controller.cmd_enable = 0
         controller.history_warmup_steps = 0
+        controller._terrain_warmed_steps = 0
         controller._depth_ready_once = False
         controller._last_wait_report = 0.0
         controller.btn_rise = {"stop": False}
@@ -143,6 +227,12 @@ class TAPTerrainTests(unittest.TestCase):
         controller.policy_step = 0
         sent_enables = []
         controller.send_cmd = lambda: sent_enables.append(controller.cmd_enable)
+        controller._apply_policy_action = (
+            lambda active_policy, action: Controller._apply_action(
+                controller, action
+            )
+        )
+        controller._commit_applied_policy_target = lambda active_policy: None
 
         def process_state(**kwargs):
             calls["state"] += 1
@@ -343,6 +433,31 @@ class TAPTerrainTests(unittest.TestCase):
             [("action", [1, 29])],
         )
 
+        switch = task["policy_switch"]
+        self.assertEqual(
+            switch["combo_buttons"], ["left_key_one", "right_key_one"]
+        )
+        teleop_config_path = (
+            task_path.parent / switch["teleop_tracking_config"]
+        ).resolve()
+        teleop_config = yaml.safe_load(teleop_config_path.read_text())
+        teleop_onnx = (
+            teleop_config_path.parent / teleop_config["policy_path"]
+        ).resolve()
+        self.assertTrue(teleop_onnx.is_file(), teleop_onnx)
+        self.assertTrue(teleop_onnx.with_suffix(".json").is_file())
+        teleop_session = ort.InferenceSession(
+            str(teleop_onnx), providers=["CPUExecutionProvider"]
+        )
+        self.assertEqual(
+            [(item.name, item.shape) for item in teleop_session.get_inputs()],
+            [("observation", ["batch", 8809])],
+        )
+        self.assertEqual(
+            [(item.name, item.shape) for item in teleop_session.get_outputs()],
+            [("action", ["batch", 29])],
+        )
+
     def test_policy_wrapper_runs_the_exported_model(self):
         policy_path = SIM2REAL_ROOT / "config/g1/tap-terrain-policy.yaml"
         policy_dict = yaml.safe_load(policy_path.read_text())
@@ -374,6 +489,39 @@ class TAPTerrainTests(unittest.TestCase):
         action = policy.compute_action()
         self.assertEqual(action.shape, (29,))
         self.assertTrue(np.isfinite(action).all())
+
+    def test_tap_teleop_wrapper_runs_the_exported_model(self):
+        policy_path = SIM2REAL_ROOT / "config/g1/tap-teleop-policy.yaml"
+        policy_dict = yaml.safe_load(policy_path.read_text())
+        policy_dict["_config_dir"] = str(policy_path.parent)
+        policy_dict["_config_path"] = str(policy_path)
+        controller_dict = yaml.safe_load(
+            (SIM2REAL_ROOT / "config/g1/controller.yaml").read_text()
+        )
+        controller_config = DictToClass(controller_dict)
+        joint_count = len(controller_config.policy_joint_names)
+        controller = SimpleNamespace(
+            config=controller_config,
+            dof_size=joint_count,
+            qj=np.asarray(controller_config.default_qpos, dtype=np.float32),
+            dqj=np.zeros(joint_count, dtype=np.float32),
+            tau=np.zeros(joint_count, dtype=np.float32),
+            tau_latest=np.zeros(joint_count, dtype=np.float32),
+            quat=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            gyro=np.zeros(3, dtype=np.float32),
+        )
+        policy = TrackingPolicyRaw(
+            "tap_teleop", DictToClass(policy_dict), controller
+        )
+        try:
+            policy.fade_in()
+            policy.update_obs()
+            self.assertEqual(policy.policy_observation_copy().shape, (8809,))
+            action = policy.compute_action()
+            self.assertEqual(action.shape, (29,))
+            self.assertTrue(np.isfinite(action).all())
+        finally:
+            policy.deactivate()
 
 
 if __name__ == "__main__":

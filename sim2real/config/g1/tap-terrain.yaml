@@ -4,6 +4,14 @@ tracking_config: "tap-terrain-policy.yaml"
 # Training resets older history slots to zero and acts on the first frame.
 history_warmup_steps: 0
 
+# PICO two-primary-button toggle: left primary (X) + right primary (A).
+policy_switch:
+  enabled: true
+  teleop_tracking_config: "tap-teleop-policy.yaml"
+  combo_buttons: ["left_key_one", "right_key_one"]
+  freshness_timeout_s: 0.25
+  blend_duration_s: 1.0
+
 # Reuse the repository's terrain scene and its training-matched pelvis camera.
 scene_xml: "assets/g1_teleop_upper_lower_locomani.xml"
 sim_bridge_config: "bridge_tap_terrain.yaml"
@@ -30,6 +38,17 @@ camera_process:
   timeout_s: 0.25
   max_invalid_fraction: 0.6
   seed: 0
+  # Keep the simulated pinhole model aligned with the external/local D435i
+  # profile used by g1-camera-stream.  The XML site carries the same mount.
+  hardware:
+    width: 640
+    height: 360
+    fps: 30
+    expected_fov_x_deg: 89.04160508162592
+    expected_fov_y_deg: 57.9
+    mount_body: "pelvis"
+    mount_position_m: [0.125461581205, 0.0197, -0.059520040551]
+    mount_quaternion_wxyz: [0.86601716, 0.00377874, 0.49999524, -0.00218165]
   preprocess:
     contract: "tap_terrain_v1"
     min_depth_m: 0.1

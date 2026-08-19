@@ -464,9 +464,16 @@ class TrackingPolicyRaw(Policy):
         self.actor_profile = (
             str(getattr(policy_cfg, "actor_profile", "legacy")).strip().lower().replace("-", "_")
         )
-        if self.actor_profile not in ("legacy", "wbteleop", "spv5_1", "spv5_2"):
+        if self.actor_profile not in (
+            "legacy",
+            "wbteleop",
+            "spv5_1",
+            "spv5_2",
+            "tap_teleop",
+        ):
             raise ValueError(
-                f"[TrackingPolicyRaw] actor_profile must be legacy, wbteleop, spv5_1, or spv5_2; "
+                "[TrackingPolicyRaw] actor_profile must be legacy, wbteleop, "
+                "spv5_1, spv5_2, or tap_teleop; "
                 f"got {self.actor_profile!r}"
             )
         self.body_name = "torso_link"
@@ -524,6 +531,23 @@ class TrackingPolicyRaw(Policy):
         self.init_count = 0
 
     def _validate_policy_input_key(self):
+        if self.actor_profile == "tap_teleop":
+            expected_keys = [
+                "spv5_2_reference",
+                "spv5_2_robot_5frame_estimator_808",
+                "robot_root_quat",
+            ]
+            if (
+                self.module.in_keys != expected_keys
+                or self.onnx_input_name != "observation"
+            ):
+                raise ValueError(
+                    "[TrackingPolicyRaw] actor_profile='tap_teleop' requires "
+                    f"policy.json in_keys={expected_keys!r} and ONNX input "
+                    f"'observation'; got in_keys={self.module.in_keys!r}, "
+                    f"onnx={self.onnx_input_name!r}"
+                )
+            return
         expected = {
             "spv5_1": "spv5_1_observation",
             "spv5_2": "spv5_2_observation",
@@ -572,6 +596,12 @@ class TrackingPolicyRaw(Policy):
             self.obs_modules = [SPV52ActorObservation(self)]
             self.num_obs = sum(module.size for module in self.obs_modules)
             return
+        if self.actor_profile == "tap_teleop":
+            from runtime.observation import TAPTeleopActorObservation
+
+            self.obs_modules = [TAPTeleopActorObservation(self)]
+            self.num_obs = sum(module.size for module in self.obs_modules)
+            return
 
         from runtime.observation import (
             TrackingCommandObsRaw,
@@ -613,7 +643,7 @@ class TrackingPolicyRaw(Policy):
     def current_joint_torque_obs(self) -> np.ndarray:
         torque = (
             self.controller.tau_latest
-            if self.actor_profile == "spv5_2"
+            if self.actor_profile in ("spv5_2", "tap_teleop")
             else self.controller.tau
         )
         return self.mapper_observation.map_state_to_from(torque).astype(np.float32)

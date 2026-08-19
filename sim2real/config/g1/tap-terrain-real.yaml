@@ -4,6 +4,14 @@ tracking_config: "tap-terrain-policy.yaml"
 # Training resets older history slots to zero and acts on the first frame.
 history_warmup_steps: 0
 
+# PICO two-primary-button toggle: left primary (X) + right primary (A).
+policy_switch:
+  enabled: true
+  teleop_tracking_config: "tap-teleop-policy.yaml"
+  combo_buttons: ["left_key_one", "right_key_one"]
+  freshness_timeout_s: 0.25
+  blend_duration_s: 1.0
+
 velocity_command:
   source: "sticks"
   fixed: [0.0, 0.0, 0.0]
@@ -15,6 +23,8 @@ velocity_command:
   min_forward_speed: 0.0
 
 camera_process:
+  # External/local D435i published by the g1-camera-stream branch.  This is
+  # not the Unitree built-in head-camera stream.
   source: "d435i"
   depth_connect: "tcp://127.0.0.1:28811"
   timeout_s: 0.25
@@ -22,6 +32,17 @@ camera_process:
   hardware:
     width: 640
     height: 360
+    fps: 30
+    # Keep the real serial number in g1-camera-stream/camera.yaml and launch
+    # its sender with that file.  The sender reads this camera's factory
+    # intrinsics through pyrealsense2.
+    expected_fov_x_deg: 89.04160508162592
+    expected_fov_y_deg: 57.9
+    fov_tolerance_deg: 6.0
+    # Training-matched transform from pelvis to the TAP +X-forward ray frame.
+    mount_body: "pelvis"
+    mount_position_m: [0.125461581205, 0.0197, -0.059520040551]
+    mount_quaternion_wxyz: [0.86601716, 0.00377874, 0.49999524, -0.00218165]
   preprocess:
     contract: "tap_terrain_v1"
     min_depth_m: 0.1

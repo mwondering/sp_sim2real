@@ -1,5 +1,5 @@
 task_name: "TAP—terrain"
-policy_path: "../../../../terrain_bfm_ckpts/model_18000_play_full.onnx"
+policy_path: "../../../ckpts/0818_terrain/model_18000_play_full.onnx"
 actor_profile: "tap_terrain"
 use_policy_metadata: true
 

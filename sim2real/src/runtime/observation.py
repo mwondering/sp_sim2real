@@ -778,7 +778,108 @@ class TAPTerrainActorObservation(BaseObs):
                 f"expected {self.SIZE}"
             )
         if not np.isfinite(self._value).all():
-            raise ValueError(f"{self.PROFILE_NAME} observation contains non-finite values")
+            raise ValueError(
+                f"{self.PROFILE_NAME} observation contains non-finite values"
+            )
 
     def compute(self) -> np.ndarray:
         return self._value
+
+
+class TAPTeleopActorObservation(TAPTerrainActorObservation):
+    """Exact 8809-D input for the TAP-compatible teleoperation policy.
+
+    The policy reuses the TAP/SPV5-2 proprioceptive and estimator histories,
+    but replaces terrain velocity/depth inputs with the 50-frame PICO
+    reference and appends the current robot root quaternion.
+    """
+
+    PROFILE_NAME = "TAP—teleop"
+    REFERENCE_STEPS = tuple(range(-42, 8))
+    REFERENCE_FRAME_DIM = 3 + 6 + 29
+    REFERENCE_DIM = len(REFERENCE_STEPS) * REFERENCE_FRAME_DIM
+    ROOT_QUAT_DIM = 4
+    SIZE = (
+        REFERENCE_DIM
+        + TAPTerrainActorObservation.PROPRIO_WITHOUT_ESTIMATES_DIM
+        + TAPTerrainActorObservation.ESTIMATOR_HISTORY_DIM
+        + ROOT_QUAT_DIM
+    )
+
+    def update(self) -> None:
+        joint_pos = self.policy.current_joint_pos_obs()
+        joint_vel = self.policy.current_joint_vel_obs()
+        gravity = _quat_apply_inv(
+            self.ctrl.quat,
+            np.asarray([0.0, 0.0, -1.0], dtype=np.float32),
+        ).astype(np.float32)
+        samples = (
+            joint_pos - self.policy.default_joint_pos_obs,
+            joint_vel,
+            gravity,
+            self.ctrl.gyro,
+            self.policy.last_action,
+            self.policy.current_joint_torque_obs(),
+        )
+        for history, sample in zip(self.histories, samples, strict=True):
+            history.append(sample)
+
+        latest_proprio = np.concatenate(
+            tuple(
+                history.values[-self.POLICY_HISTORY_LENGTH :].reshape(-1)
+                for history in self.histories
+            )
+        )
+        robot_key_body = self.kinematics.semantic_keypoint_state(
+            joint_pos,
+            joint_vel,
+            self.ctrl.gyro,
+        )
+        proprio_without_estimates = np.concatenate(
+            (latest_proprio, robot_key_body)
+        )
+        if (
+            proprio_without_estimates.size
+            != self.PROPRIO_WITHOUT_ESTIMATES_DIM
+        ):
+            raise RuntimeError(
+                f"{self.PROFILE_NAME} proprio prefix has "
+                f"{proprio_without_estimates.size} values, expected "
+                f"{self.PROPRIO_WITHOUT_ESTIMATES_DIM}"
+            )
+
+        estimator_history = np.concatenate(
+            tuple(history.flat() for history in self.histories)
+        )
+        indices = _reference_indices(self.policy, self.REFERENCE_STEPS)
+        reference = np.concatenate(
+            (
+                self.policy.ref_root_pos[indices],
+                quat_to_rot6d_wxyz(self.policy.ref_root_quat[indices]),
+                self.policy.ref_joint_pos[indices],
+            ),
+            axis=-1,
+        ).reshape(-1)
+        if reference.size != self.REFERENCE_DIM:
+            raise RuntimeError(
+                f"{self.PROFILE_NAME} reference has {reference.size} values, "
+                f"expected {self.REFERENCE_DIM}"
+            )
+
+        self._value = np.concatenate(
+            (
+                reference,
+                proprio_without_estimates,
+                estimator_history,
+                np.asarray(self.ctrl.quat, dtype=np.float32),
+            )
+        ).astype(np.float32)
+        if self._value.size != self.SIZE:
+            raise RuntimeError(
+                f"{self.PROFILE_NAME} observation has {self._value.size} values, "
+                f"expected {self.SIZE}"
+            )
+        if not np.isfinite(self._value).all():
+            raise ValueError(
+                f"{self.PROFILE_NAME} observation contains non-finite values"
+            )

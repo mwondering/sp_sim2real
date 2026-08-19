@@ -41,6 +41,7 @@ class DepthRayCamera:
         site_name: str = "depth_camera",
         add_noise: bool = False,
         seed: int = 0,
+        fov_y_deg: float = 57.9,
         depth_processor: TAPTerrainDepthProcessor | None = None,
     ) -> None:
         self.model = model
@@ -55,7 +56,12 @@ class DepthRayCamera:
             raise ValueError(f"Camera mount site {site_name!r} is absent from XML")
         self.camera_body_id = int(model.site_bodyid[self.site_id])
 
-        vertical_aperture = 2.0 * math.tan(math.radians(57.9) / 2.0)
+        self.fov_y_deg = float(fov_y_deg)
+        if not 0.0 < self.fov_y_deg < 180.0:
+            raise ValueError(f"Invalid vertical camera FOV: {self.fov_y_deg}")
+        vertical_aperture = 2.0 * math.tan(
+            math.radians(self.fov_y_deg) / 2.0
+        )
         horizontal_aperture = vertical_aperture * self.raw_width / self.raw_height
         fx = self.raw_width / horizontal_aperture
         fy = self.raw_height / vertical_aperture
@@ -193,12 +199,16 @@ def main(argv=None) -> None:
     depth_processor = None
     if isinstance(preprocess_cfg, dict) and preprocess_cfg.get("contract") == "tap_terrain_v1":
         depth_processor = TAPTerrainDepthProcessor.from_config(preprocess_cfg)
+    hardware_cfg = camera_cfg.get("hardware", {})
+    if not isinstance(hardware_cfg, dict):
+        raise ValueError("camera_process.hardware must be a mapping")
     camera = DepthRayCamera(
         model,
         data,
         site_name=str(camera_cfg.get("site_name", "depth_camera")),
         add_noise=bool(args.depth_noise),
         seed=int(camera_cfg.get("seed", 0)),
+        fov_y_deg=float(hardware_cfg.get("expected_fov_y_deg", 57.9)),
         depth_processor=depth_processor,
     )
     if args.show_depth:
