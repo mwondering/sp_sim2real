@@ -1,0 +1,18 @@
+[project]
+name = "g1-pico-reference-server"
+version = "0.1.0"
+description = "PICO reception, G1 retargeting, motion replay, and reference streaming"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+  "mink>=1.1.0",
+  "mjviser>=0.0.11",
+  "mujoco",
+  "numpy",
+  "pyyaml",
+  "pyzmq>=27.1.0",
+  "scipy",
+]
+
+[tool.uv]
+# This repo is script-oriented; only manage deps/env with uv.
+package = false

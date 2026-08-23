@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.uv-cache/
+.pytest_cache/
+.mypy_cache/
+.vscode/
+.idea/
+build/
+dist/
+*.log
+
+# Runtime recordings and locally cloned XRoboToolkit sources.
+/sim2real/assets/
+/sim2real/teleop/deps/
+
+# The pico branch never carries deployment or policy artifacts.
+/g1_sim2real/
+/ckpt/
+/ckpts/
+**/ckpt/
+**/ckpts/
+*.onnx
+*.onnx.data
+*.pt
+*.pth
+*.ckpt

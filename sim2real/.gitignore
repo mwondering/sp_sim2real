@@ -1,0 +1,15 @@
+*__pycache__*
+*.egg-info
+*.pyc
+.uv-cache/
+.venv/
+/assets/
+/teleop/deps/
+/teleop/debs/
+**/ckpt/
+**/ckpts/
+*.onnx
+*.onnx.data
+*.pt
+*.pth
+*.ckpt
