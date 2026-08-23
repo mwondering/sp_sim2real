@@ -36,16 +36,18 @@ ensure_python_build_tools() {
     if "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
 import setuptools
 import wheel
+import pybind11
 PY
     then
         return 0
     fi
 
     echo "[install_xrobottoolkit_sdk] installing Python build tools with uv"
-    if uv pip install --python "$PYTHON_BIN" setuptools wheel; then
+    if uv pip install --python "$PYTHON_BIN" setuptools wheel "pybind11>=3.0.0"; then
         if "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
 import setuptools
 import wheel
+import pybind11
 PY
         then
             return 0
@@ -57,6 +59,7 @@ PY
         if "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
 import setuptools
 import wheel
+import pybind11
 PY
         then
             return 0
@@ -64,17 +67,18 @@ PY
     fi
 
     echo "[install_xrobottoolkit_sdk] ensurepip did not provide build tools; retrying uv pip"
-    uv pip install --python "$PYTHON_BIN" setuptools wheel
+    uv pip install --python "$PYTHON_BIN" setuptools wheel "pybind11>=3.0.0"
 
     if "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
 import setuptools
 import wheel
+import pybind11
 PY
     then
         return 0
     fi
 
-    echo "[install_xrobottoolkit_sdk] failed to install setuptools/wheel into $PYTHON_BIN" >&2
+    echo "[install_xrobottoolkit_sdk] failed to install setuptools/wheel/pybind11 into $PYTHON_BIN" >&2
     exit 1
 }
 
