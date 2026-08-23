@@ -1,0 +1,903 @@
+import argparse
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
+
+import mujoco
+import mujoco.viewer
+import numpy as np
+import yaml
+from sshkeyboard import listen_keyboard, stop_listening
+
+SRC_ROOT = Path(__file__).resolve().parent
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from common.joint_mapper import JointMapper
+from common.udp_latest import LatestPacket
+from common.udp_transport import UDPRobotLow
+from common.utils import DictToClass, Timer
+from paths import SUPPORTED_ROBOTS, bridge_config_path
+from runtime.depth_overlay import DepthPointCloudOverlay
+from runtime.zmq_stream import ArrayPublisher
+
+np.set_printoptions(formatter={"float": lambda x: "{0:0.2f}".format(x)})
+
+Keyboard2Button = {
+    "a": "A",
+    "s": "start",
+    "x": "stop",
+    "u": "up",
+    "d": "down",
+}
+BUTTON_KEYS = ("start", "stop", "A", "up", "down")
+STICK_KEYS = ("lx", "ly", "rx", "ry")
+KEYBOARD_MOTION_AXES = {
+    "w": ("ly", 1.0),
+    "s": ("ly", -1.0),
+    "a": ("lx", 1.0),
+    "d": ("lx", -1.0),
+    "q": ("rx", 1.0),
+    "e": ("rx", -1.0),
+}
+_MISSING = object()
+
+
+def _cfg_value(data, name: str, path: str, default=_MISSING):
+    if isinstance(data, dict):
+        if name in data:
+            return data[name]
+    elif hasattr(data, name):
+        return getattr(data, name)
+    if default is not _MISSING:
+        return default
+    raise ValueError(f"{path} is required")
+
+
+def _as_vector(data, *, name: str, size: int | None = None, dtype=np.float64) -> np.ndarray:
+    arr = np.asarray(data, dtype=dtype)
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be a 1D vector")
+    if size is not None and arr.size != size:
+        raise ValueError(f"{name} has size {arr.size}, expected {size}")
+    return arr
+
+
+def _normalize_default_pose_mode(value: str) -> str:
+    normalized = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "teleport": "teleport",
+        "kinematic": "teleport",
+        "sim2real_pd": "sim2real_pd",
+        "dynamic": "sim2real_pd",
+        "pd": "sim2real_pd",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "startup.default_pose_mode must be 'teleport' or 'sim2real_pd', "
+            f"got {value!r}"
+        )
+    return aliases[normalized]
+
+
+def _keyboard_motion_sticks(
+    pressed_keys,
+    *,
+    magnitude: float = 1.0,
+) -> dict[str, float]:
+    """Convert held WASD/QE keys to normalized virtual-stick axes."""
+    magnitude = float(magnitude)
+    if not 0.0 < magnitude <= 1.0:
+        raise ValueError("keyboard.motion_magnitude must be in (0, 1]")
+    sticks = {name: 0.0 for name in STICK_KEYS}
+    for key in pressed_keys:
+        binding = KEYBOARD_MOTION_AXES.get(str(key).lower())
+        if binding is None:
+            continue
+        axis, direction = binding
+        sticks[axis] += direction * magnitude
+    return {
+        name: float(np.clip(value, -1.0, 1.0))
+        for name, value in sticks.items()
+    }
+
+
+def _compute_pd_control(qpos, qvel, target, kp, kd, lower, upper) -> np.ndarray:
+    control = np.asarray(kp) * (np.asarray(target) - np.asarray(qpos))
+    control += np.asarray(kd) * (0.0 - np.asarray(qvel))
+    return np.clip(control, np.asarray(lower), np.asarray(upper))
+
+
+def _compute_base_stabilization(
+    qpos,
+    qvel,
+    target_qpos,
+    *,
+    xy_kp: float,
+    xy_kd: float,
+    rotation_kp: float,
+    rotation_kd: float,
+) -> np.ndarray:
+    """Return a temporary 6-DoF base wrench for the pre-policy PD hold."""
+    qpos = np.asarray(qpos, dtype=np.float64)
+    qvel = np.asarray(qvel, dtype=np.float64)
+    target_qpos = np.asarray(target_qpos, dtype=np.float64)
+    wrench = np.zeros(6, dtype=np.float64)
+    wrench[:2] = xy_kp * (target_qpos[:2] - qpos[:2]) - xy_kd * qvel[:2]
+    rotation_error = np.zeros(3, dtype=np.float64)
+    mujoco.mju_subQuat(rotation_error, target_qpos[3:7], qpos[3:7])
+    wrench[3:6] = rotation_kp * rotation_error - rotation_kd * qvel[3:6]
+    return wrench
+
+
+class Sim2Sim:
+    def __init__(self, args, config):
+        self.args = args
+        self.config = config
+        self.robot = str(args.robot).lower()
+        self.log_prefix = f"[{self.robot.upper()}Sim2Sim]"
+
+        freq_cfg = _cfg_value(config, "freq", "freq")
+        self.low_level_freq = int(_cfg_value(freq_cfg, "physical_hz", "freq.physical_hz"))
+        if self.low_level_freq <= 0:
+            raise ValueError("freq.physical_hz must be positive")
+        self.state_decimation = int(_cfg_value(freq_cfg, "state_decimation", "freq.state_decimation"))
+        if self.state_decimation <= 0:
+            raise ValueError("freq.state_decimation must be positive")
+        self.state_freq = self.low_level_freq / self.state_decimation
+        self.state_dt = 1.0 / self.state_freq
+        self.low_level_dt = 1.0 / self.low_level_freq
+        print(
+            f"{self.log_prefix} freq: physical_hz={self.low_level_freq}, "
+            f"state_decimation={self.state_decimation}, state_hz={self.state_freq:.3f}"
+        )
+
+        xml_candidate = Path(args.xml_path or _cfg_value(config, "xml_path", "xml_path"))
+        if xml_candidate.is_absolute():
+            model_path = str(xml_candidate)
+        else:
+            model_path = str((Path(config._config_dir) / xml_candidate).resolve())
+        self.model = mujoco.MjModel.from_xml_path(model_path)
+        self.model.opt.timestep = self.low_level_dt
+        self.data = mujoco.MjData(self.model)
+        self._tau_sum_mujoco = np.zeros(self.model.nu, dtype=np.float64)
+        self._tau_sample_count = 0
+
+        self.policy_joint_names = list(_cfg_value(config, "policy_joint_names", "policy_joint_names"))
+        self.mujoco_joint_names = list(
+            _cfg_value(config, "mujoco_joint_names", "mujoco_joint_names", self.policy_joint_names)
+        )
+        self.n_policy_joints = len(self.policy_joint_names)
+        self.n_mujoco_joints = len(self.mujoco_joint_names)
+        if self.model.nu != self.n_mujoco_joints:
+            raise ValueError(f"model.nu={self.model.nu} != configured mujoco joints={self.n_mujoco_joints}")
+        if len(self.model.actuator_ctrlrange) != self.n_mujoco_joints:
+            raise ValueError("actuator ctrl range size does not match configured mujoco joints")
+
+        self.policy_to_mujoco = JointMapper(self.policy_joint_names, self.mujoco_joint_names)
+        mapping_info = self.policy_to_mujoco.get_mapping_info()
+        print(
+            f"{self.log_prefix} policy->mujoco mapping: "
+            f"{mapping_info['mapped_joints']}/{mapping_info['from_space_size']} joints mapped"
+        )
+        if mapping_info["unmapped_from_joints"]:
+            raise ValueError(f"Unmapped policy joints: {mapping_info['unmapped_from_joints']}")
+        if mapping_info["unmapped_to_joints"]:
+            raise ValueError(f"Unmapped MuJoCo joints: {mapping_info['unmapped_to_joints']}")
+
+        self.ctrl_lower = self.model.actuator_ctrlrange[:, 0]
+        self.ctrl_upper = self.model.actuator_ctrlrange[:, 1]
+
+        self.home_q_policy = _as_vector(
+            _cfg_value(config, "home_q", "home_q"),
+            name="home_q",
+            size=self.n_policy_joints,
+        )
+        self.root_qpos_home = _as_vector(
+            _cfg_value(config, "root_qpos_home", "root_qpos_home"),
+            name="root_qpos_home",
+            size=7,
+        )
+        self.root_qpos_control = _as_vector(
+            _cfg_value(config, "root_qpos_control", "root_qpos_control"),
+            name="root_qpos_control",
+            size=7,
+        )
+        startup_cfg = _cfg_value(config, "startup", "startup", {})
+        self.default_pose_mode = _normalize_default_pose_mode(
+            _cfg_value(
+                startup_cfg,
+                "default_pose_mode",
+                "startup.default_pose_mode",
+                "teleport",
+            )
+        )
+        default_target_stable_s = float(
+            _cfg_value(
+                startup_cfg,
+                "target_stable_s",
+                "startup.target_stable_s",
+                0.1,
+            )
+        )
+        if default_target_stable_s < 0.0:
+            raise ValueError("startup.target_stable_s must be non-negative")
+        self.default_target_stable_steps = max(
+            1,
+            int(round(default_target_stable_s * self.low_level_freq)),
+        )
+        self.default_target_tolerance = float(
+            _cfg_value(
+                startup_cfg,
+                "target_tolerance",
+                "startup.target_tolerance",
+                1e-6,
+            )
+        )
+        self.base_xy_kp = float(
+            _cfg_value(startup_cfg, "base_xy_kp", "startup.base_xy_kp", 2000.0)
+        )
+        self.base_xy_kd = float(
+            _cfg_value(startup_cfg, "base_xy_kd", "startup.base_xy_kd", 100.0)
+        )
+        self.base_rotation_kp = float(
+            _cfg_value(
+                startup_cfg,
+                "base_rotation_kp",
+                "startup.base_rotation_kp",
+                1000.0,
+            )
+        )
+        self.base_rotation_kd = float(
+            _cfg_value(
+                startup_cfg,
+                "base_rotation_kd",
+                "startup.base_rotation_kd",
+                50.0,
+            )
+        )
+        if self.default_target_tolerance < 0.0:
+            raise ValueError("startup.target_tolerance must be non-negative")
+        self.viewer_fps = int(_cfg_value(config, "viewer_fps", "viewer_fps", 10))
+        self.max_external_force = float(_cfg_value(config, "max_external_force", "max_external_force", 30.0))
+        print(f"{self.log_prefix} startup.default_pose_mode={self.default_pose_mode}")
+
+        keyboard_cfg = _cfg_value(config, "keyboard", "keyboard", {})
+        self.keyboard_motion_enabled = bool(
+            _cfg_value(
+                keyboard_cfg,
+                "motion_enabled",
+                "keyboard.motion_enabled",
+                False,
+            )
+        )
+        self.keyboard_motion_magnitude = float(
+            _cfg_value(
+                keyboard_cfg,
+                "motion_magnitude",
+                "keyboard.motion_magnitude",
+                1.0,
+            )
+        )
+        if not 0.0 < self.keyboard_motion_magnitude <= 1.0:
+            raise ValueError("keyboard.motion_magnitude must be in (0, 1]")
+        if self.keyboard_motion_enabled:
+            self.start_key = str(
+                _cfg_value(keyboard_cfg, "start_key", "keyboard.start_key", "r")
+            ).lower()
+            self.policy_key = str(
+                _cfg_value(keyboard_cfg, "policy_key", "keyboard.policy_key", "p")
+            ).lower()
+            self.stop_key = str(
+                _cfg_value(keyboard_cfg, "stop_key", "keyboard.stop_key", "x")
+            ).lower()
+            control_keys = (self.start_key, self.policy_key, self.stop_key)
+            if len(set(control_keys)) != len(control_keys):
+                raise ValueError("keyboard start/policy/stop keys must be distinct")
+            conflicts = sorted(set(control_keys) & set(KEYBOARD_MOTION_AXES))
+            if conflicts:
+                raise ValueError(
+                    "keyboard start/policy/stop keys conflict with WASD/QE motion keys: "
+                    f"{conflicts}"
+                )
+            self.keyboard_button_map = {
+                self.start_key: "start",
+                self.policy_key: "A",
+                self.stop_key: "stop",
+                "u": "up",
+            }
+        else:
+            self.start_key = "s"
+            self.policy_key = "a"
+            self.stop_key = "x"
+            self.keyboard_button_map = dict(Keyboard2Button)
+
+        self.data.qpos[:7] = self.root_qpos_home
+        self.data.qpos[7:] = self._policy_to_mujoco(self.home_q_policy)
+        self.data.qvel[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+
+        self._ptargets_policy = self.home_q_policy.copy()
+        self._kp_policy = np.zeros(self.n_policy_joints, dtype=np.float64)
+        self._kd_policy = np.zeros(self.n_policy_joints, dtype=np.float64)
+        self._have_command = False
+        self._have_tracking_target = False
+        self._loaded_default_pose = False
+        self._default_target_stable_count = 0
+        self._last_default_target_policy = self.home_q_policy.copy()
+        self._buttons = {k: False for k in BUTTON_KEYS}
+        self._pressed_motion_keys: set[str] = set()
+
+        self._cmd_lock = threading.Lock()
+        self._button_lock = threading.Lock()
+        self._sim_lock = threading.Lock()
+        self._policy_delay_lock = threading.Lock()
+        self._policy_delay_count = 0
+        self._policy_delay_sum_ms = 0.0
+        self._policy_delay_min_ms = float("inf")
+        self._policy_delay_max_ms = 0.0
+
+        if self.keyboard_motion_enabled:
+            print(
+                f"{self.log_prefix} keyboard: {self.start_key}=ready, "
+                f"{self.policy_key}=policy, {self.stop_key}=stop, "
+                "W/S=forward/backward, A/D=left/right, Q/E=turn left/right; "
+                "release motion keys to command zero"
+            )
+
+        self.transport = UDPRobotLow(config.udp, on_command_packet=self.cmd_sub_handler)
+        state_stream_cfg = _cfg_value(config, "sim_state_stream", "sim_state_stream", {})
+        self._sim_state_publisher = None
+        self._sim_state_seq = 0
+        if bool(_cfg_value(state_stream_cfg, "enabled", "sim_state_stream.enabled", False)):
+            bind = str(
+                _cfg_value(
+                    state_stream_cfg,
+                    "bind",
+                    "sim_state_stream.bind",
+                    "tcp://*:28810",
+                )
+            )
+            self._sim_state_publisher = ArrayPublisher(bind, topic="sim_state")
+            print(f"{self.log_prefix} sim-state stream bind={bind}")
+        depth_debug_cfg = _cfg_value(config, "depth_debug", "depth_debug", {})
+        self._depth_overlay = None
+        if bool(_cfg_value(depth_debug_cfg, "enabled", "depth_debug.enabled", False)):
+            self._depth_overlay = DepthPointCloudOverlay(
+                self.model,
+                self.data,
+                connect=str(
+                    _cfg_value(
+                        depth_debug_cfg,
+                        "connect",
+                        "depth_debug.connect",
+                        "tcp://127.0.0.1:28811",
+                    )
+                ),
+                site_name=str(
+                    _cfg_value(
+                        depth_debug_cfg,
+                        "site_name",
+                        "depth_debug.site_name",
+                        "depth_camera",
+                    )
+                ),
+                stride=int(
+                    _cfg_value(
+                        depth_debug_cfg,
+                        "stride",
+                        "depth_debug.stride",
+                        4,
+                    )
+                ),
+                point_size=float(
+                    _cfg_value(
+                        depth_debug_cfg,
+                        "point_size",
+                        "depth_debug.point_size",
+                        0.012,
+                    )
+                ),
+            )
+
+        self.keyboard_thread = threading.Thread(
+            target=listen_keyboard,
+            kwargs={"on_press": self.on_press, "on_release": self.on_release},
+            daemon=False,
+        )
+        self.is_alive = True
+        self.policy_queried = False
+
+        self.render_gui = bool(config.render_gui)
+        self.viewer = None
+        self._viewer_tick = 0
+        self._physics_tick = 0
+        self.viewer_decim = max(1, self.low_level_freq // max(1, self.viewer_fps))
+        self.imu_gyro_adr, self.imu_gyro_dim = self._resolve_sensor_slice("imu_ang_vel")
+        self.imu_lin_acc_adr, self.imu_lin_acc_dim = self._resolve_sensor_slice("imu_lin_acc")
+
+        signal.signal(signal.SIGINT, self.close)
+
+    def _policy_to_mujoco(self, values: np.ndarray, default_values: np.ndarray | None = None) -> np.ndarray:
+        return self.policy_to_mujoco.map_action_from_to(values, default_values=default_values)
+
+    def _mujoco_to_policy(self, values: np.ndarray) -> np.ndarray:
+        return self.policy_to_mujoco.map_state_to_from(values)
+
+    def _step_current_pd_command(self, *, stabilize_base: bool = False) -> None:
+        with self._cmd_lock:
+            ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
+            kp_mujoco = self._policy_to_mujoco(self._kp_policy)
+            kd_mujoco = self._policy_to_mujoco(self._kd_policy)
+        with self._sim_lock:
+            self.data.qfrc_applied[:6] = 0.0
+            if stabilize_base:
+                self.data.qfrc_applied[:6] = _compute_base_stabilization(
+                    self.data.qpos[:7],
+                    self.data.qvel[:6],
+                    self.root_qpos_control,
+                    xy_kp=self.base_xy_kp,
+                    xy_kd=self.base_xy_kd,
+                    rotation_kp=self.base_rotation_kp,
+                    rotation_kd=self.base_rotation_kd,
+                )
+            self.data.ctrl[:] = _compute_pd_control(
+                self.data.qpos[7:],
+                self.data.qvel[6:],
+                ptargets_mujoco,
+                kp_mujoco,
+                kd_mujoco,
+                self.ctrl_lower,
+                self.ctrl_upper,
+            )
+            self._limit_external_forces()
+            mujoco.mj_step(self.model, self.data)
+            self._tau_sum_mujoco += self.data.qfrc_actuator[6:]
+            self._tau_sample_count += 1
+
+    def _step_default_pose_startup(self, *, force_load: bool = False) -> None:
+        """Follow deploy's interpolation, then switch to a loaded PD hold."""
+        if self._loaded_default_pose:
+            self._step_current_pd_command(stabilize_base=True)
+            return
+
+        with self._cmd_lock:
+            ptargets_policy = self._ptargets_policy.copy()
+            kp_policy = self._kp_policy.copy()
+        gains_active = bool(np.any(kp_policy > 0.0))
+        target_delta = float(
+            np.max(np.abs(ptargets_policy - self._last_default_target_policy))
+        )
+        if gains_active and target_delta <= self.default_target_tolerance:
+            self._default_target_stable_count += 1
+        else:
+            self._default_target_stable_count = 0
+        self._last_default_target_policy[:] = ptargets_policy
+
+        ptargets_mujoco = self._policy_to_mujoco(ptargets_policy)
+        with self._sim_lock:
+            # Keep the legacy suspended interpolation.  Starting free dynamics
+            # from bridge.yaml's all-zero home_q is not a valid standing state.
+            self.data.qpos[:7] = self.root_qpos_home
+            self.data.qvel[:6] = 0.0
+            self.data.qpos[7:] = ptargets_mujoco
+            self.data.qvel[6:] = 0.0
+            self.data.ctrl[:] = 0.0
+            self.data.qfrc_applied[:6] = 0.0
+            mujoco.mj_forward(self.model, self.data)
+
+        if (
+            not force_load
+            and self._default_target_stable_count < self.default_target_stable_steps
+        ):
+            return
+
+        with self._sim_lock:
+            # The exact target is now the policy metadata default pose.  Put it
+            # at ground height and enable joint dynamics before policy handoff.
+            self.data.qpos[:7] = self.root_qpos_control
+            self.data.qpos[7:] = ptargets_mujoco
+            self.data.qvel[:] = 0.0
+            self.data.ctrl[:] = 0.0
+            self.data.qfrc_applied[:6] = 0.0
+            mujoco.mj_forward(self.model, self.data)
+            self._tau_sum_mujoco[:] = 0.0
+            self._tau_sample_count = 0
+        self._loaded_default_pose = True
+        self._have_tracking_target = True
+        print(
+            f"{self.log_prefix} Default target is stable; grounded PD hold is active. "
+            f"Press '{self.policy_key}' to enter policy"
+        )
+
+    def _set_button(self, name: str, value: bool) -> None:
+        with self._button_lock:
+            self._buttons[name] = value
+
+    def _buttons_snapshot(self):
+        with self._button_lock:
+            return dict(self._buttons)
+
+    def _sticks_snapshot(self):
+        with self._button_lock:
+            if not self.keyboard_motion_enabled:
+                return {name: 0.0 for name in STICK_KEYS}
+            return _keyboard_motion_sticks(
+                self._pressed_motion_keys,
+                magnitude=self.keyboard_motion_magnitude,
+            )
+
+    def on_press(self, key):
+        print(f"Key pressed: {key}")
+        key = str(key).lower()
+        btn = self.keyboard_button_map.get(key)
+        if btn is not None:
+            self._set_button(btn, True)
+        if self.keyboard_motion_enabled and key in KEYBOARD_MOTION_AXES:
+            with self._button_lock:
+                self._pressed_motion_keys.add(key)
+
+    def on_release(self, key):
+        key = str(key).lower()
+        if self.keyboard_motion_enabled and key in KEYBOARD_MOTION_AXES:
+            with self._button_lock:
+                self._pressed_motion_keys.discard(key)
+        btn = self.keyboard_button_map.get(key)
+        if btn is not None:
+            time.sleep(0.1)
+            self._set_button(btn, False)
+
+    def cmd_sub_handler(self, packet: LatestPacket):
+        payload = packet.data
+        q_des = np.asarray(
+            payload.get("q_des", np.zeros(self.n_policy_joints, dtype=np.float32)),
+            dtype=np.float64,
+        )
+        kp = np.asarray(payload.get("kp", np.zeros(self.n_policy_joints, dtype=np.float32)), dtype=np.float64)
+        kd = np.asarray(payload.get("kd", np.zeros(self.n_policy_joints, dtype=np.float32)), dtype=np.float64)
+        enable = int(payload.get("enable", 0))
+        if q_des.size != self.n_policy_joints or kp.size != self.n_policy_joints or kd.size != self.n_policy_joints:
+            print(f"{self.log_prefix} Ignore UDP command with unexpected DOF size")
+            return
+        with self._cmd_lock:
+            self._ptargets_policy[:] = q_des
+            self._kp_policy[:] = kp
+            self._kd_policy[:] = kd
+        self._record_policy_delay(payload)
+        self.policy_queried |= bool(enable)
+        self._have_command = True
+
+    def _record_policy_delay(self, payload):
+        state_receive_time_ns = payload.get("state_receive_time_ns", None)
+        if state_receive_time_ns is None:
+            return
+        try:
+            delay_ms = (time.perf_counter_ns() - int(state_receive_time_ns)) * 1e-6
+        except (TypeError, ValueError):
+            return
+        if delay_ms < 0.0:
+            return
+        with self._policy_delay_lock:
+            self._policy_delay_count += 1
+            self._policy_delay_sum_ms += delay_ms
+            self._policy_delay_min_ms = min(self._policy_delay_min_ms, delay_ms)
+            self._policy_delay_max_ms = max(self._policy_delay_max_ms, delay_ms)
+
+    def _consume_policy_delay_stats(self):
+        with self._policy_delay_lock:
+            count = self._policy_delay_count
+            if count == 0:
+                return None
+            mean_ms = self._policy_delay_sum_ms / count
+            min_ms = self._policy_delay_min_ms
+            max_ms = self._policy_delay_max_ms
+            self._policy_delay_count = 0
+            self._policy_delay_sum_ms = 0.0
+            self._policy_delay_min_ms = float("inf")
+            self._policy_delay_max_ms = 0.0
+        return mean_ms, min_ms, max_ms, count
+
+    def _resolve_sensor_slice(self, sensor_name: str):
+        sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, sensor_name)
+        if sid < 0:
+            return None, 0
+        return int(self.model.sensor_adr[sid]), int(self.model.sensor_dim[sid])
+
+    def _linacc(self) -> np.ndarray:
+        if self.imu_lin_acc_adr is None or self.imu_lin_acc_dim < 3:
+            return np.zeros(3, dtype=np.float32)
+        return self.data.sensordata[self.imu_lin_acc_adr : self.imu_lin_acc_adr + 3].copy().astype(np.float32)
+
+    def _gyro(self) -> np.ndarray:
+        if self.imu_gyro_adr is None or self.imu_gyro_dim < 3:
+            return self.data.qvel[3:6].copy().astype(np.float32)
+        return self.data.sensordata[self.imu_gyro_adr : self.imu_gyro_adr + 3].copy().astype(np.float32)
+
+    def _publish_state(self):
+        with self._sim_lock:
+            q = self._mujoco_to_policy(self.data.qpos[7:]).astype(np.float32)
+            dq = self._mujoco_to_policy(self.data.qvel[6:]).astype(np.float32)
+            if self._tau_sample_count > 0:
+                tau_mujoco = self._tau_sum_mujoco / float(self._tau_sample_count)
+            else:
+                tau_mujoco = self.data.qfrc_actuator[6:].copy()
+            tau = self._mujoco_to_policy(tau_mujoco).astype(np.float32)
+            tau_latest = self._mujoco_to_policy(
+                self.data.qfrc_actuator[6:]
+            ).astype(np.float32)
+            self._tau_sum_mujoco[:] = 0.0
+            self._tau_sample_count = 0
+            quat = self.data.qpos[3:7].copy().astype(np.float32)
+            gyro = self._gyro()
+            linacc = self._linacc()
+            full_state = np.concatenate((self.data.qpos, self.data.qvel)).astype(
+                np.float32
+            )
+            sim_time = float(self.data.time)
+        self.transport.send_state(
+            q=q,
+            dq=dq,
+            quat_wxyz=quat,
+            gyro=gyro,
+            linacc=linacc,
+            tau=tau,
+            tau_latest=tau_latest,
+            buttons=self._buttons_snapshot(),
+            sticks=self._sticks_snapshot(),
+        )
+        if self._sim_state_publisher is not None:
+            self._sim_state_publisher.send(
+                full_state,
+                seq=self._sim_state_seq,
+                sim_time=sim_time,
+                metadata={"nq": int(self.model.nq), "nv": int(self.model.nv)},
+            )
+            self._sim_state_seq += 1
+
+    def _publish_state_if_due(self):
+        self._physics_tick += 1
+        if (self._physics_tick % self.state_decimation) == 0:
+            self._publish_state()
+
+    def wait_for_high_cmd(self):
+        print("Waiting for high level controller...")
+        state_timer = Timer(self.state_dt)
+        while self.is_alive and not self._have_command:
+            self._publish_state()
+            state_timer.sleep()
+        print("Connected to high level")
+        print(f'Press "{self.start_key}" to move to default pose')
+        running_zero_cmd = True
+        while self.is_alive and running_zero_cmd:
+            buttons = self._buttons_snapshot()
+            running_zero_cmd = not bool(buttons["start"])
+            self._publish_state()
+            state_timer.sleep()
+
+    def simulate_gantry(self):
+        use_sim2real_pd = self.default_pose_mode == "sim2real_pd"
+        if use_sim2real_pd:
+            print(
+                "Moving to default pose...\n"
+                "Wait for the grounded-PD-ready message, then press "
+                f"'{self.policy_key}' to begin control loop"
+            )
+        else:
+            print(
+                "Moving to default pose...\n"
+                f"Press '{self.policy_key}' after the robot is in default pose "
+                "to begin control loop"
+            )
+        timer = Timer(self.low_level_dt)
+        while True:
+            if use_sim2real_pd:
+                self._step_default_pose_startup()
+            else:
+                with self._cmd_lock:
+                    ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
+                with self._sim_lock:
+                    self.data.qpos[:7] = self.root_qpos_home
+                    self.data.qvel[:6] = 0.0
+                    self.data.qpos[7:] = ptargets_mujoco
+                    self.data.qvel[6:] = 0.0
+                    self.data.ctrl[:] = 0.0
+                    mujoco.mj_forward(self.model, self.data)
+
+            if not self._viewer_sync():
+                break
+
+            self._publish_state_if_due()
+
+            buttons = self._buttons_snapshot()
+            running_default_pos = not (bool(buttons["A"]) or bool(buttons["stop"]))
+            if not running_default_pos:
+                break
+            timer.sleep()
+
+    def simulate_control(self):
+        print("Running control loop...")
+        use_sim2real_pd = self.default_pose_mode == "sim2real_pd"
+        if use_sim2real_pd and not self._loaded_default_pose:
+            # An early 'a' should not reintroduce the old zero-dq/zero-torque
+            # handoff.  Start the loaded hold from the latest deploy target.
+            self._step_default_pose_startup(force_load=True)
+        elif not use_sim2real_pd:
+            with self._sim_lock:
+                self.data.qpos[:7] = self.root_qpos_control
+                mujoco.mj_forward(self.model, self.data)
+
+        timer = Timer(self.low_level_dt)
+        time_start = time.time()
+        last_log_time = time_start
+        loop_count = 0
+
+        while self.is_alive:
+            if not self.policy_queried:
+                if use_sim2real_pd:
+                    self._step_current_pd_command(stabilize_base=True)
+                self._publish_state_if_due()
+                timer.sleep()
+                time_start = time.time()
+                last_log_time = time_start
+                loop_count = 0
+                continue
+
+            if use_sim2real_pd:
+                # cmd_enable is set only after deploy observes A.  Releasing the
+                # startup stabilizer here preserves the loaded joint/contact
+                # state and applies the first policy target in the same step.
+                self._step_current_pd_command(stabilize_base=False)
+            else:
+                with self._cmd_lock:
+                    ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
+                    kp_mujoco = self._policy_to_mujoco(self._kp_policy)
+                    kd_mujoco = self._policy_to_mujoco(self._kd_policy)
+
+                with self._sim_lock:
+                    qpos = self.data.qpos[7:]
+                    qvel = self.data.qvel[6:]
+                    if not self._have_tracking_target:
+                        delta = ptargets_mujoco - qpos
+                        if float(np.linalg.norm(delta)) > 1e-4:
+                            self._have_tracking_target = True
+                    if not self._have_tracking_target:
+                        self.data.qpos[:7] = self.root_qpos_control
+                        self.data.qvel[:6] = 0.0
+                        self.data.qpos[7:] = ptargets_mujoco
+                        self.data.qvel[6:] = 0.0
+                        self.data.ctrl[:] = 0.0
+                        mujoco.mj_forward(self.model, self.data)
+                    else:
+                        self.data.ctrl[:] = _compute_pd_control(
+                            qpos,
+                            qvel,
+                            ptargets_mujoco,
+                            kp_mujoco,
+                            kd_mujoco,
+                            self.ctrl_lower,
+                            self.ctrl_upper,
+                        )
+                        self._limit_external_forces()
+                        mujoco.mj_step(self.model, self.data)
+                    self._tau_sum_mujoco += self.data.qfrc_actuator[6:]
+                    self._tau_sample_count += 1
+
+            if not self._viewer_sync():
+                break
+
+            self._publish_state_if_due()
+
+            now = time.time()
+            if now - last_log_time >= 1.0:
+                seconds = loop_count * self.low_level_dt
+                seconds_real = now - time_start
+                with self._sim_lock:
+                    root_z = float(self.data.qpos[2])
+                delay_stats = self._consume_policy_delay_stats()
+                if delay_stats is None:
+                    delay_text = "policy_delay_ms=n/a"
+                else:
+                    mean_ms, min_ms, max_ms, delay_count = delay_stats
+                    delay_text = (
+                        f"policy_delay_ms mean={mean_ms:.3f} min={min_ms:.3f} "
+                        f"max={max_ms:.3f} n={delay_count}"
+                    )
+                print(f"Time: {seconds:.2f}, Time real: {seconds_real:.2f}, Height: {root_z:.2f}, {delay_text}")
+                last_log_time = now
+
+            loop_count += 1
+            timer.sleep()
+
+        self.close()
+
+    def _limit_external_forces(self):
+        if self.max_external_force <= 0.0:
+            return
+        for i in range(self.model.nbody):
+            force = self.data.xfrc_applied[i, :3]
+            force_magnitude = np.linalg.norm(force)
+            if force_magnitude > self.max_external_force:
+                self.data.xfrc_applied[i, :3] = force * (self.max_external_force / force_magnitude)
+
+    def _viewer_sync(self) -> bool:
+        if self.viewer is None:
+            return True
+        if not self.viewer.is_running():
+            self.is_alive = False
+            return False
+        self._viewer_tick += 1
+        if (self._viewer_tick % self.viewer_decim) == 0:
+            if self._depth_overlay is not None:
+                self._depth_overlay.update(self.viewer)
+            self.viewer.sync()
+        return True
+
+    def run(self):
+        self.keyboard_thread.start()
+
+        if self.render_gui:
+            with mujoco.viewer.launch_passive(
+                self.model,
+                self.data,
+                show_left_ui=False,
+                show_right_ui=False,
+            ) as viewer:
+                self.viewer = viewer
+                try:
+                    self.wait_for_high_cmd()
+                    self.simulate_gantry()
+                    self.simulate_control()
+                finally:
+                    self.viewer = None
+        else:
+            self.wait_for_high_cmd()
+            self.simulate_gantry()
+            self.simulate_control()
+
+    def close(self, *args):
+        if not self.is_alive:
+            return
+        self.is_alive = False
+        self._set_button("stop", True)
+        stop_listening()
+        self.transport.close()
+        if self._sim_state_publisher is not None:
+            self._sim_state_publisher.close()
+        if self._depth_overlay is not None:
+            self._depth_overlay.close()
+        if self.keyboard_thread.is_alive() and threading.current_thread() is not self.keyboard_thread:
+            self.keyboard_thread.join(timeout=1.0)
+        sys.exit(0)
+
+
+def load_config(path: str) -> DictToClass:
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = DictToClass(yaml.load(f, Loader=yaml.FullLoader))
+    setattr(cfg, "_config_dir", str(Path(path).resolve().parent))
+    return cfg
+
+
+def main(argv=None):
+    try:
+        import multiprocessing as mp
+
+        if mp.get_start_method(allow_none=True) is None:
+            mp.set_start_method("spawn", force=True)
+    except Exception:
+        pass
+
+    parser = argparse.ArgumentParser(description="Unified UDP MuJoCo sim2sim runner")
+    parser.add_argument("--robot", choices=list(SUPPORTED_ROBOTS), default="g1")
+    parser.add_argument("--xml_path", type=str, default=None)
+    parser.add_argument("--bridge-config", type=str, default=None)
+    args = parser.parse_args(argv)
+
+    config_path = args.bridge_config or str(bridge_config_path(args.robot))
+    config = load_config(config_path)
+    Sim2Sim(args, config).run()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,20 @@
+[project]
+name = "gmt-sim2real"
+version = "0.1.0"
+description = "G1 SPV5-2 Sim2Real and Sim2Sim deployment runtime"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+  "linuxfd",
+  "mujoco",
+  "numpy",
+  "onnxruntime",
+  "pyyaml",
+  "pyzmq>=27.1.0",
+  "scipy",
+  "sshkeyboard",
+]
+
+[tool.uv]
+# This repo is script-oriented; only manage deps/env with uv.
+package = false

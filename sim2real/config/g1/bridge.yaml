@@ -1,0 +1,65 @@
+render_gui: true
+xml_path: "assets/g1.xml"
+udp:
+  state_host: "127.0.0.1"
+  state_port: 55001
+  cmd_bind_host: "0.0.0.0"
+  cmd_port: 55002
+freq:
+  physical_hz: 500
+  state_decimation: 10
+# Follow deploy.py's policy-metadata default target, then run a grounded PD hold
+# before policy handoff. A temporary planar/orientation base stabilizer prevents
+# the policy-off robot from simply falling; it is removed on the first policy
+# command. Use "teleport" to reproduce the old zero-dq/zero-torque handoff.
+startup:
+  default_pose_mode: "sim2real_pd"
+  target_stable_s: 0.2
+  target_tolerance: 1.0e-6
+  base_xy_kp: 2000.0
+  base_xy_kd: 100.0
+  base_rotation_kp: 1000.0
+  base_rotation_kd: 50.0
+viewer_fps: 10
+
+policy_joint_names: [
+  "left_hip_pitch_joint", "right_hip_pitch_joint", "waist_yaw_joint",
+  "left_hip_roll_joint", "right_hip_roll_joint", "waist_roll_joint",
+  "left_hip_yaw_joint", "right_hip_yaw_joint", "waist_pitch_joint",
+  "left_knee_joint", "right_knee_joint",
+  "left_shoulder_pitch_joint", "right_shoulder_pitch_joint",
+  "left_ankle_pitch_joint", "right_ankle_pitch_joint",
+  "left_shoulder_roll_joint", "right_shoulder_roll_joint",
+  "left_ankle_roll_joint", "right_ankle_roll_joint",
+  "left_shoulder_yaw_joint", "right_shoulder_yaw_joint",
+  "left_elbow_joint", "right_elbow_joint",
+  "left_wrist_roll_joint", "right_wrist_roll_joint",
+  "left_wrist_pitch_joint", "right_wrist_pitch_joint",
+  "left_wrist_yaw_joint", "right_wrist_yaw_joint"
+]
+
+mujoco_joint_names: [
+  "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint", "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+  "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint", "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+  "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+  "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint", "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+  "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint", "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint"
+]
+
+home_q: [
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0,
+  0.0, 0.0,
+  0.0, 0.0,
+  0.0, 0.0,
+  0.0, 0.0,
+  0.0, 0.0,
+  0.0, 0.0,
+  0.0, 0.0,
+  0.0, 0.0,
+  0.0, 0.0
+]
+root_qpos_home: [0.0, 0.0, 2.0, 0.707, 0.0, 0.0, 0.707]
+root_qpos_control: [0.0, 0.0, 0.78, 0.707, 0.0, 0.0, 0.707]
