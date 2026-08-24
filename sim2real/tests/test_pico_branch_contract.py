@@ -69,7 +69,7 @@ class PicoBranchContractTests(unittest.TestCase):
         l7_motion = [
             path for path in self.files if path.startswith("sim2real/config/l7/motions/")
         ]
-        self.assertEqual((len(root_motion), len(g1_motion), len(l7_motion)), (4, 17, 10))
+        self.assertEqual((len(root_motion), len(g1_motion), len(l7_motion)), (21, 17, 10))
 
     def test_only_g1_retarget_runtime_is_exposed(self):
         self.assertEqual(SUPPORTED_ROBOTS, ("g1",))
@@ -85,8 +85,8 @@ class PicoBranchContractTests(unittest.TestCase):
     def test_g1_motion_loads_as_36d_reference(self):
         config = load_teleop_robot_config("g1")
         motion_path = (
-            SIM2REAL_ROOT
-            / "config/g1/motions/omni_extreme/omni_extreme_1.npz"
+            REPO_ROOT
+            / "motion/omni_extreme_1.npz"
         )
         qpos, fps = load_motion(motion_path, config.dof_names)
         self.assertEqual(config.dof_count, 29)
@@ -96,9 +96,9 @@ class PicoBranchContractTests(unittest.TestCase):
         self.assertGreater(fps, 0.0)
 
     def test_motion_server_auto_discovers_and_queues_repeated_selections(self):
-        motion_root = SIM2REAL_ROOT / "config/g1/motions"
-        first_name = "omni_extreme/omni_extreme_1"
-        second_name = "omni_extreme/omni_extreme_2"
+        motion_root = REPO_ROOT / "motion"
+        first_name = "omni_extreme_1"
+        second_name = "omni_extreme_2"
         server = MotionReferenceServer(
             SimpleNamespace(
                 config=SIM2REAL_ROOT / "config/g1/retarget/teleop.yaml",
@@ -117,7 +117,7 @@ class PicoBranchContractTests(unittest.TestCase):
 
         self.assertEqual(server.state, "waiting")
         self.assertIsNone(server.qpos)
-        self.assertEqual(len(server.motion_files), 17)
+        self.assertEqual(len(server.motion_files), 21)
 
         first = server.handle_selection_request(
             {"command": "select", "motion": first_name}

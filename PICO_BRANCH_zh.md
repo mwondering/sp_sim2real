@@ -37,7 +37,7 @@ MOTION_SELECT_PORT=28704 VIEWER_PORT=8080 \
 bash scripts/launch_pico.sh --source motion
 ```
 
-启动时会自动扫描仓库的 `sim2real/config/g1/motions`，无需手动指定路径。`motion-select`
+启动时会自动扫描仓库根目录的 `motion`，无需手动指定路径。`motion-select`
 窗口会列出所有 G1 motion，可输入编号、完整名称或唯一子串选择。每条 motion 只播放一次，
 操作顺序如下：
 
@@ -50,6 +50,22 @@ bash scripts/launch_pico.sh --source motion
 选择下一条，机载端会先完成默认位姿过渡，再自动启动队列中的 motion。`MOTION_SELECT_PORT`
 默认是 `28704`，仅绑定外部主机的 `127.0.0.1`，不需要向 G1 开放。若 motion 不在仓库默认
 目录，可通过 `MOTION_ROOT=/path/to/motions` 覆盖扫描路径。
+
+播放器直接读取仓库根目录 `motion` 中的 IsaacLab/Sonic 格式，即 `joint_pos`、
+`body_pos_w` 和 wxyz 顺序的 `body_quat_w`。默认启动命令为：
+
+```bash
+cd sim2real
+bash scripts/launch_pico.sh --source motion
+```
+
+将 `sim2real/config/g1/motions` 中原有的 robot-motion 文件批量转换到根目录 `motion`：
+
+```bash
+uv run python teleop/convert_motion_to_isaaclab.py
+```
+
+转换脚本默认不覆盖已有输出；需要重新生成时添加 `--overwrite`。
 
 原始 PICO 录制回放：
 

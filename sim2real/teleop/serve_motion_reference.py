@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve a robot motion NPZ through the live G1 reference protocol."""
+"""Serve robot-motion or IsaacLab/Sonic NPZ through the G1 reference protocol."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 
+from motion_formats import load_reference_motion
 from retarget.viser_viewer import MJViserViewer
 from utils.helper import default_controller_buttons
 from utils.robot_config import load_teleop_robot_config
@@ -20,6 +21,7 @@ from utils.robot_config import load_teleop_robot_config
 
 PROTOCOL = "g1-reference-v1"
 MOTION_SELECT_PROTOCOL = "g1-motion-select-v1"
+DEFAULT_MOTION_ROOT = Path(__file__).resolve().parents[2] / "motion"
 
 
 def discover_motion_files(root: Path) -> list[Path]:
@@ -70,52 +72,18 @@ def resolve_motion_choice(choice: str, root: Path) -> Path:
     raise ValueError(f"unknown motion {requested!r}")
 
 
-def _decode_names(values: np.ndarray) -> list[str]:
-    return [
-        value.decode("utf-8") if isinstance(value, (bytes, np.bytes_)) else str(value)
-        for value in np.asarray(values).reshape(-1).tolist()
-    ]
-
-
-def load_motion(path: Path, target_joint_names: tuple[str, ...]) -> tuple[np.ndarray, float]:
-    with np.load(path, allow_pickle=False) as data:
-        required = {"root_pos", "root_rot", "dof_pos", "joint_names"}
-        missing = sorted(required.difference(data.files))
-        if missing:
-            raise ValueError(f"motion is missing fields {missing}: {path}")
-
-        root_pos = np.asarray(data["root_pos"], dtype=np.float32)
-        root_xyzw = np.asarray(data["root_rot"], dtype=np.float32)
-        joint_pos = np.asarray(data["dof_pos"], dtype=np.float32)
-        source_names = _decode_names(data["joint_names"])
-        fps = float(np.asarray(data["fps"]).reshape(())) if "fps" in data.files else 50.0
-
-    if root_pos.ndim != 2 or root_pos.shape[1] != 3:
-        raise ValueError(f"root_pos must be [T,3], got {root_pos.shape}")
-    if root_xyzw.ndim != 2 or root_xyzw.shape[1] != 4:
-        raise ValueError(f"root_rot must be [T,4] xyzw, got {root_xyzw.shape}")
-    if joint_pos.ndim != 2 or joint_pos.shape[0] != root_pos.shape[0]:
-        raise ValueError(f"dof_pos must be [T,J], got {joint_pos.shape}")
-    if len(source_names) != joint_pos.shape[1]:
-        raise ValueError("joint_names and dof_pos dimensions differ")
-
-    by_name = {name: index for index, name in enumerate(source_names)}
-    missing_names = [name for name in target_joint_names if name not in by_name]
-    if missing_names:
-        raise ValueError(f"motion is missing G1 joints: {missing_names}")
-    joint_pos = joint_pos[:, [by_name[name] for name in target_joint_names]]
-
-    root_wxyz = np.concatenate([root_xyzw[:, 3:4], root_xyzw[:, :3]], axis=1)
-    norms = np.linalg.norm(root_wxyz, axis=1, keepdims=True)
-    if np.any(norms < 1.0e-6):
-        raise ValueError("motion contains an invalid root quaternion")
-    root_wxyz = root_wxyz / norms
-    qpos = np.concatenate([root_pos, root_wxyz, joint_pos], axis=1).astype(np.float32)
-    if not np.isfinite(qpos).all() or qpos.shape[1] != 7 + len(target_joint_names):
-        raise ValueError(f"invalid qpos array {qpos.shape}")
-    if fps <= 0.0:
-        raise ValueError(f"fps must be positive, got {fps}")
-    return np.ascontiguousarray(qpos), fps
+def load_motion(
+    path: Path,
+    target_joint_names: tuple[str, ...],
+    *,
+    root_body_index: int = 0,
+) -> tuple[np.ndarray, float]:
+    qpos, fps, _schema = load_reference_motion(
+        path,
+        target_joint_names,
+        root_body_index=root_body_index,
+    )
+    return qpos, fps
 
 
 class MotionReferenceServer:
@@ -132,6 +100,7 @@ class MotionReferenceServer:
         self.motion_files = discover_motion_files(self.motion_root)
         if not self.motion_files:
             raise RuntimeError(f"no .npz motions found under {self.motion_root}")
+        self.root_body_index = int(getattr(args, "root_body_index", 0))
         self.motion_path: Path | None = None
         self.motion_name = ""
         self.qpos: np.ndarray | None = None
@@ -180,7 +149,11 @@ class MotionReferenceServer:
 
     def _load_selected_motion(self, choice: str) -> None:
         path = resolve_motion_choice(choice, self.motion_root)
-        qpos, fps = load_motion(path, self.config.dof_names)
+        qpos, fps = load_motion(
+            path,
+            self.config.dof_names,
+            root_body_index=self.root_body_index,
+        )
         self.motion_path = path
         self.motion_name = motion_display_name(path, self.motion_root)
         self.qpos = qpos
@@ -404,8 +377,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--motion-root",
         type=Path,
-        default=Path("config/g1/motions"),
+        default=DEFAULT_MOTION_ROOT,
         help="Root containing selectable G1 motion NPZ files.",
+    )
+    parser.add_argument(
+        "--root-body-index",
+        type=int,
+        default=0,
+        help="Root body index for IsaacLab/Sonic body_pos_w and body_quat_w arrays.",
     )
     parser.add_argument(
         "--select-bind-addr",

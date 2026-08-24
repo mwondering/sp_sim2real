@@ -62,15 +62,37 @@ MOTION_SELECT_PORT=28704 VIEWER_PORT=8080 \
 bash scripts/launch_pico.sh --source motion
 ```
 
-脚本默认自动扫描仓库的 `sim2real/config/g1/motions`，不需要指定 motion 路径，并打开
+脚本默认自动扫描仓库根目录的 `motion`，不需要指定 motion 路径，并打开
 `motion-select` 交互窗口。机载 deploy 启动后只需按一次遥控器 `A` 进入策略控制；此后在
 `motion-select` 输入编号或名称，motion 会在策略就绪后自动开始。动作结束时仍由当前策略
 平滑过渡到默认 reference，并保持策略控制等待下一次选择，不需要再按 `Up` 或 `A`。
 `28704` 仅供外部主机本地选择器使用，默认绑定 `127.0.0.1`。如需使用另一目录，可设置
 `MOTION_ROOT=/path/to/motions`。
 
-分支保留了原仓库全部 31 个 motion 文件。当前 reference server 面向 G1，因此只有包含完整
-G1 joint names 的 robot motion 可以直接发送；L7 motion 作为原始 motion 数据保留。
+播放器支持仓库根目录 `motion` 所使用的 IsaacLab/Sonic 格式
+（`joint_pos/body_pos_w/body_quat_w`，四元数为 wxyz）和原有 robot-motion 格式
+（`dof_pos/root_pos/root_rot/joint_names`，四元数为 xyzw）。默认启动即可播放根目录 motion：
+
+```bash
+cd sim2real
+bash scripts/launch_pico.sh --source motion
+```
+
+将 `sim2real/config/g1/motions` 中已有 motion 批量转换到根目录 `motion`：
+
+```bash
+cd sim2real
+uv run python teleop/convert_motion_to_isaaclab.py
+```
+
+转换文件会直接平铺到 `motion`，转换前检查重名且默认拒绝覆盖；重新生成时显式添加
+`--overwrite`。字段约定和自定义
+输入输出参数见 [`sim2real/teleop/README.md`](sim2real/teleop/README.md)。
+
+分支保留了原仓库 31 个 motion，并在根目录增加了 17 个转换后的 G1 motion。当前
+reference server 面向 G1，可直接发送带完整
+G1 `joint_names` 的 robot motion，或采用内置 G1 IsaacLab 关节顺序的 IsaacLab/Sonic
+motion；L7 motion 仅作为原始数据保留。
 
 停止服务：
 

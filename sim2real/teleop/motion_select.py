@@ -10,6 +10,7 @@ from typing import Any
 import zmq
 
 from serve_motion_reference import (
+    DEFAULT_MOTION_ROOT,
     MOTION_SELECT_PROTOCOL,
     discover_motion_files,
     motion_display_name,
@@ -86,7 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--motion-root",
         type=Path,
-        default=Path("config/g1/motions"),
+        default=DEFAULT_MOTION_ROOT,
     )
     parser.add_argument(
         "--connect-addr",
