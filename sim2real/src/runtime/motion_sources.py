@@ -556,6 +556,8 @@ class VRMotionSource(MotionSourceBase):
         self.remote_reference_source = ""
         self.remote_motion_name = ""
         self.remote_motion_finished = False
+        self._last_motion_command_seq = -1
+        self._pending_motion_command_seq: Optional[int] = None
         self._latest_control_sticks: dict[str, float] = {}
         shared_store = getattr(policy_cfg, "_pico_store", None)
         if shared_store is not None and not isinstance(shared_store, PicoFrameStore):
@@ -751,30 +753,47 @@ class VRMotionSource(MotionSourceBase):
             self._shared_store.publish_control(active=False)
         print("[VRMotionSource] VR stop requested")
 
-    def can_return_to_default(self) -> bool:
-        return bool(
-            self.remote_reference_source == "motion"
-            and self.remote_motion_finished
-            and self.policy.current_done
-        )
-
-    def notify_default_pose(self) -> bool:
-        """Tell the host motion server that G1 is returning to its default pose."""
-        if self._req_sock is None:
-            print("[VRMotionSource] cannot notify default pose: request socket unavailable")
+    def _record_motion_command(self, payload: dict) -> bool:
+        """Queue a newly selected host motion without emulating controller input."""
+        if not isinstance(payload, dict):
+            return False
+        if str(payload.get("source", "")).strip().lower() != "motion":
+            return False
+        if str(payload.get("state", "")).strip().lower() != "queued":
             return False
         try:
-            self._req_sock.send_string(
-                json.dumps({"command": "default"}), flags=zmq.NOBLOCK
-            )
-        except zmq.Again:
-            print("[VRMotionSource] cannot notify default pose: request socket busy")
+            command_seq = int(payload.get("motion_command_seq", 0))
+        except (TypeError, ValueError):
             return False
-        except Exception as exc:
-            print(f"[VRMotionSource] default-pose notification failed: {exc}")
+        if command_seq <= 0 or command_seq == self._last_motion_command_seq:
             return False
+
+        self._last_motion_command_seq = command_seq
+        self._pending_motion_command_seq = command_seq
+        self.remote_reference_source = "motion"
+        self.remote_motion_name = str(payload.get("motion", "")).strip()
         self.remote_motion_finished = False
-        print("[VRMotionSource] default-pose notification sent")
+        print(
+            f"[VRMotionSource] queued host motion: "
+            f"{self.remote_motion_name or '<unnamed>'} (command_seq={command_seq})"
+        )
+        return True
+
+    def _start_queued_motion_if_ready(self) -> bool:
+        if self._pending_motion_command_seq is None:
+            return False
+        if not self.policy.current_done:
+            return False
+        if self._vr_active or self._pending_start_request:
+            return False
+
+        command_seq = self._pending_motion_command_seq
+        self._pending_motion_command_seq = None
+        self.request_start()
+        print(
+            f"[VRMotionSource] starting queued host motion "
+            f"(command_seq={command_seq})"
+        )
         return True
 
     def _drain_control(self) -> None:
@@ -783,6 +802,7 @@ class VRMotionSource(MotionSourceBase):
 
         latest_buttons: Optional[dict] = None
         latest_sticks: Optional[dict] = None
+        latest_motion_payload: Optional[dict] = None
         pressed_buttons: set[str] = set()
         while True:
             try:
@@ -797,6 +817,8 @@ class VRMotionSource(MotionSourceBase):
                 payload = json.loads(raw)
             except Exception:
                 continue
+            if str(payload.get("source", "")).strip().lower() == "motion":
+                latest_motion_payload = payload
             buttons = self._extract_buttons(payload)
             if buttons is not None:
                 latest_buttons = buttons
@@ -808,6 +830,9 @@ class VRMotionSource(MotionSourceBase):
             sticks = self._extract_sticks(payload)
             if sticks is not None:
                 latest_sticks = sticks
+
+        if latest_motion_payload is not None:
+            self._record_motion_command(latest_motion_payload)
 
         if latest_sticks is not None:
             self._latest_control_sticks = {str(k): float(v) for k, v in latest_sticks.items()}
@@ -1109,6 +1134,11 @@ class VRMotionSource(MotionSourceBase):
                 self._bump_vr_stat("ignore_inactive")
                 continue
 
+            if reply_source:
+                self.remote_reference_source = reply_source
+            if reply_motion_name:
+                self.remote_motion_name = reply_motion_name
+
             out_frames = []
             for f in parsed_frames:
                 aligned = self._align_vr_frame(f)
@@ -1117,6 +1147,8 @@ class VRMotionSource(MotionSourceBase):
             out_frames = self._appendable_reply_frames(out_frames)
             if len(out_frames) == 0:
                 self._bump_vr_stat("ignore_no_aligned")
+                if reply_source == "motion" and reply_finished:
+                    self._finish_remote_motion()
                 continue
 
             seg = {
@@ -1126,23 +1158,8 @@ class VRMotionSource(MotionSourceBase):
             }
             self.policy.append_ref_frames(seg)
             last_aligned_frame = out_frames[-1]
-            if reply_source:
-                self.remote_reference_source = reply_source
-            if reply_motion_name:
-                self.remote_motion_name = reply_motion_name
             if reply_source == "motion" and reply_finished:
-                self.remote_motion_finished = True
-                self._vr_user_enabled = False
-                self._pending_start_request = False
-                self._vr_active = False
-                self._req_inflight = False
-                self._req_inflight_steps_left = 0
-                if self._shared_store is not None:
-                    self._shared_store.publish_control(active=False)
-                print(
-                    f"[VRMotionSource] motion finished: "
-                    f"{self.remote_motion_name or '<unnamed>'}"
-                )
+                self._finish_remote_motion()
             if self._shared_store is not None:
                 self._shared_store.publish_frame(
                     last_aligned_frame,
@@ -1152,6 +1169,25 @@ class VRMotionSource(MotionSourceBase):
             self._bump_vr_stat("append")
             self._bump_vr_stat("append_frames", len(out_frames))
         return last_aligned_frame
+
+    def _finish_remote_motion(self) -> None:
+        """Keep policy control active and append a local default reference."""
+        self.remote_motion_finished = True
+        self._vr_user_enabled = False
+        self._pending_start_request = False
+        self._vr_active = False
+        self._req_inflight = False
+        self._req_inflight_steps_left = 0
+        self._vr_in_transition = False
+        self._vr_transition_count = 0
+        if self._shared_store is not None:
+            self._shared_store.publish_control(active=False)
+        if not self.append_motion_from_tail("default"):
+            print("[VRMotionSource] failed to append the default reference")
+        print(
+            f"[VRMotionSource] motion finished: "
+            f"{self.remote_motion_name or '<unnamed>'}; returning to default reference"
+        )
 
     def _send_request_if_needed(self) -> None:
         if self._req_sock is None:
@@ -1178,6 +1214,8 @@ class VRMotionSource(MotionSourceBase):
 
     def on_fade_in(self):
         self.append_motion_from_tail("default")
+        self._last_motion_command_seq = -1
+        self._pending_motion_command_seq = None
         self._pending_start_request = False
         self._req_inflight = False
         self._req_inflight_steps_left = 0
@@ -1206,6 +1244,7 @@ class VRMotionSource(MotionSourceBase):
         self._vr_anchor_root_quat = None
         self._vr_align_ready = False
         self._pending_start_request = False
+        self._pending_motion_command_seq = None
         super().on_fade_out()
 
     def post_step(self):
@@ -1214,12 +1253,14 @@ class VRMotionSource(MotionSourceBase):
         if last_aligned_frame is not None:
             self._req_inflight = False
             self._req_inflight_steps_left = 0
-            self._pad_future_to_low_watermark(last_aligned_frame)
+            if self._vr_active:
+                self._pad_future_to_low_watermark(last_aligned_frame)
         elif self._req_inflight:
             self._req_inflight_steps_left -= 1
             if self._req_inflight_steps_left <= 0:
                 self._req_inflight = False
                 self._req_inflight_steps_left = 0
+        self._start_queued_motion_if_ready()
         self._send_request_if_needed()
         self._warn_horizon_if_needed("post_step")
         self._print_vr_stats_if_due()
@@ -1236,6 +1277,7 @@ class VRMotionSource(MotionSourceBase):
         self._vr_anchor_root_quat = None
         self._vr_align_ready = False
         self._pending_start_request = False
+        self._pending_motion_command_seq = None
         if self._shared_store is not None:
             self._shared_store.publish_control(active=False)
         if self._req_sock is not None:

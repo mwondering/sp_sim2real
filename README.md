@@ -7,8 +7,9 @@ This branch contains only the SPV5-2 policy runtime for G1:
 - G1 onboard policy inference and the C++ Unitree bridge
 - remote PICO/motion references supplied by the companion `pico` branch
 
-For one-shot host motion playback, G1 remote A starts the selected motion and
-Up returns to the default pose after the host reports that playback finished.
-The next motion can then be selected on the host and started with A.
+For one-shot host motion playback, press G1 remote A once to enter policy
+control. Each host selection starts automatically when the local default
+reference is ready; after completion, the same policy transitions back to its
+default reference and remains active for the next selection.
 
 See [README_zh.md](README_zh.md) for deployment commands and network settings.

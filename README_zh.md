@@ -70,15 +70,16 @@ bash scripts/launch_deploy.sh --real
 
 ## 外部 motion 单次播放
 
-配套 `pico` 分支使用 `--source motion` 时，motion 单次播放，机载端使用 G1 遥控器完成
-状态切换：
+配套 `pico` 分支使用 `--source motion` 时，motion 单次播放，但机载策略持续运行：
 
-1. 默认位姿下按 `A`，开始外部主机当前选中的 motion；
-2. motion 播放完成后按方向键 `Up`，机器人平滑回到默认位姿；
-3. 外部主机在 `motion-select` 窗口选择下一条 motion，再按 `A` 开始。
+1. 机载 deploy 启动后，在默认位姿按一次 `A` 进入 SPV5-2 策略；
+2. 外部主机在 `motion-select` 选择 motion，机载端在默认 reference 就绪后自动执行；
+3. motion 播放完成后，机载端在当前策略内自动追加 100 步默认 reference 过渡；
+4. 默认过渡完成后继续保持策略控制并等待，收到下一条 motion 后自动执行。
 
-只有收到外部服务器的 `finished` 状态且 reference 缓冲已经播放完，`Up` 才会生效。运动中
-误按 `Up` 会被忽略；遥控器原有停止键仍退出策略并进入阻尼，不改变其安全语义。
+`A` 只需按一次，不需要按住，也不需要用 `Up` 返回默认位姿。新的 motion 可以在默认过渡
+期间排队，但只会在过渡完成后启动。遥控器原有停止键仍退出策略并进入阻尼，不改变其安全
+语义。
 
 启动 bridge：
 

@@ -449,7 +449,7 @@ class Controller:
         if self.recorder is not None:
             self.recorder.save()
 
-    def run(self) -> str:
+    def run(self):
         print("Running high level...")
         self._start_policy_recorder()
 
@@ -459,24 +459,7 @@ class Controller:
                 continue
 
             if self.btn_rise["stop"]:
-                return "stop"
-
-            if self.btn_rise["up"]:
-                source = getattr(self.current_policy, "source", None)
-                can_return = getattr(source, "can_return_to_default", None)
-                notify_default = getattr(source, "notify_default_pose", None)
-                if callable(can_return) and can_return():
-                    if not callable(notify_default) or not notify_default():
-                        print(
-                            "[Deploy] Up ignored: failed to notify the host motion server"
-                        )
-                        continue
-                    self.current_policy.fade_out()
-                    print("[Deploy] returning to default pose")
-                    return "default"
-                print(
-                    "[Deploy] Up ignored: wait until the selected host motion finishes"
-                )
+                break
 
             self.current_policy.update_obs()
             policy_observation = self.current_policy.policy_observation_copy()
@@ -529,12 +512,8 @@ if __name__ == "__main__":
     try:
         controller.zero_torque_state()
         controller.move_to_default_qpos()
-        while True:
-            controller.default_qpos_state()
-            result = controller.run()
-            if result != "default":
-                break
-            controller.move_to_default_qpos()
+        controller.default_qpos_state()
+        controller.run()
     except KeyboardInterrupt:
         print("Keyboard interrupt received. Exiting...")
     except Exception as e:

@@ -166,37 +166,72 @@ class PolicyMetadataFallbackTests(unittest.TestCase):
 
 
 class RemoteMotionLifecycleTests(unittest.TestCase):
-    def test_return_to_default_requires_finished_motion_and_drained_reference(self):
+    def test_new_host_motion_sequence_is_queued_once(self):
         source = object.__new__(VRMotionSource)
-        source.remote_reference_source = "motion"
-        source.remote_motion_finished = True
-        source.policy = SimpleNamespace(current_done=True)
-        self.assertTrue(source.can_return_to_default())
-
-        source.policy.current_done = False
-        self.assertFalse(source.can_return_to_default())
-        source.policy.current_done = True
-        source.remote_motion_finished = False
-        self.assertFalse(source.can_return_to_default())
-        source.remote_motion_finished = True
-        source.remote_reference_source = "pico"
-        self.assertFalse(source.can_return_to_default())
-
-    def test_default_pose_notification_uses_reference_request_channel(self):
-        class FakeRequestSocket:
-            def __init__(self):
-                self.messages = []
-
-            def send_string(self, value, flags):
-                self.messages.append((value, flags))
-
-        source = object.__new__(VRMotionSource)
-        source._req_sock = FakeRequestSocket()
+        source._last_motion_command_seq = -1
+        source._pending_motion_command_seq = None
+        source.remote_reference_source = ""
+        source.remote_motion_name = ""
         source.remote_motion_finished = True
 
-        self.assertTrue(source.notify_default_pose())
-        self.assertEqual(json.loads(source._req_sock.messages[0][0]), {"command": "default"})
+        payload = {
+            "source": "motion",
+            "state": "queued",
+            "motion": "omni_extreme/omni_extreme_1",
+            "motion_command_seq": 1,
+        }
+        self.assertTrue(source._record_motion_command(payload))
+        self.assertEqual(source._pending_motion_command_seq, 1)
+        self.assertEqual(source.remote_motion_name, payload["motion"])
         self.assertFalse(source.remote_motion_finished)
+        self.assertFalse(source._record_motion_command(payload))
+
+        next_payload = dict(payload, motion="omni_extreme/omni_extreme_2")
+        next_payload["motion_command_seq"] = 2
+        self.assertTrue(source._record_motion_command(next_payload))
+        self.assertEqual(source._pending_motion_command_seq, 2)
+
+    def test_queued_motion_starts_only_after_default_reference_finishes(self):
+        source = object.__new__(VRMotionSource)
+        source.policy = SimpleNamespace(current_done=False)
+        source._pending_motion_command_seq = 7
+        source._vr_active = False
+        source._pending_start_request = False
+        starts = []
+        source.request_start = lambda: starts.append(True)
+
+        self.assertFalse(source._start_queued_motion_if_ready())
+        self.assertEqual(source._pending_motion_command_seq, 7)
+        self.assertEqual(starts, [])
+
+        source.policy.current_done = True
+        self.assertTrue(source._start_queued_motion_if_ready())
+        self.assertIsNone(source._pending_motion_command_seq)
+        self.assertEqual(starts, [True])
+
+    def test_finished_motion_appends_default_without_leaving_policy(self):
+        source = object.__new__(VRMotionSource)
+        source.remote_motion_name = "omni_extreme/omni_extreme_1"
+        source.remote_motion_finished = False
+        source._vr_user_enabled = True
+        source._pending_start_request = False
+        source._vr_active = True
+        source._req_inflight = True
+        source._req_inflight_steps_left = 1
+        source._vr_in_transition = True
+        source._vr_transition_count = 1
+        source._shared_store = None
+        source._pending_motion_command_seq = 8
+        appended = []
+        source.append_motion_from_tail = lambda name: appended.append(name) or True
+
+        source._finish_remote_motion()
+
+        self.assertTrue(source.remote_motion_finished)
+        self.assertFalse(source._vr_user_enabled)
+        self.assertFalse(source._vr_active)
+        self.assertEqual(appended, ["default"])
+        self.assertEqual(source._pending_motion_command_seq, 8)
 
 
 if __name__ == "__main__":
