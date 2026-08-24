@@ -68,6 +68,18 @@ bash scripts/launch_deploy.sh --real
 
 这两个 window 分别运行 `bridge` 和 `policy`。以下分开启动命令仅用于排障。
 
+## 外部 motion 单次播放
+
+配套 `pico` 分支使用 `--source motion` 时，motion 单次播放，机载端使用 G1 遥控器完成
+状态切换：
+
+1. 默认位姿下按 `A`，开始外部主机当前选中的 motion；
+2. motion 播放完成后按方向键 `Up`，机器人平滑回到默认位姿；
+3. 外部主机在 `motion-select` 窗口选择下一条 motion，再按 `A` 开始。
+
+只有收到外部服务器的 `finished` 状态且 reference 缓冲已经播放完，`Up` 才会生效。运动中
+误按 `Up` 会被忽略；遥控器原有停止键仍退出策略并进入阻尼，不改变其安全语义。
+
 启动 bridge：
 
 ```bash

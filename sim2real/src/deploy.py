@@ -449,7 +449,7 @@ class Controller:
         if self.recorder is not None:
             self.recorder.save()
 
-    def run(self):
+    def run(self) -> str:
         print("Running high level...")
         self._start_policy_recorder()
 
@@ -459,7 +459,24 @@ class Controller:
                 continue
 
             if self.btn_rise["stop"]:
-                break
+                return "stop"
+
+            if self.btn_rise["up"]:
+                source = getattr(self.current_policy, "source", None)
+                can_return = getattr(source, "can_return_to_default", None)
+                notify_default = getattr(source, "notify_default_pose", None)
+                if callable(can_return) and can_return():
+                    if not callable(notify_default) or not notify_default():
+                        print(
+                            "[Deploy] Up ignored: failed to notify the host motion server"
+                        )
+                        continue
+                    self.current_policy.fade_out()
+                    print("[Deploy] returning to default pose")
+                    return "default"
+                print(
+                    "[Deploy] Up ignored: wait until the selected host motion finishes"
+                )
 
             self.current_policy.update_obs()
             policy_observation = self.current_policy.policy_observation_copy()
@@ -509,11 +526,15 @@ if __name__ == "__main__":
 
     controller = Controller(args, get_config(controller_config_path(args.robot)))
 
-    controller.zero_torque_state()
-    controller.move_to_default_qpos()
     try:
-        controller.default_qpos_state()
-        controller.run()
+        controller.zero_torque_state()
+        controller.move_to_default_qpos()
+        while True:
+            controller.default_qpos_state()
+            result = controller.run()
+            if result != "default":
+                break
+            controller.move_to_default_qpos()
     except KeyboardInterrupt:
         print("Keyboard interrupt received. Exiting...")
     except Exception as e:

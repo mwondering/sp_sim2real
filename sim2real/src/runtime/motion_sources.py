@@ -553,6 +553,9 @@ class VRMotionSource(MotionSourceBase):
         self._vr_user_enabled = False
         self._prev_start_btn = False
         self._prev_stop_btn = False
+        self.remote_reference_source = ""
+        self.remote_motion_name = ""
+        self.remote_motion_finished = False
         self._latest_control_sticks: dict[str, float] = {}
         shared_store = getattr(policy_cfg, "_pico_store", None)
         if shared_store is not None and not isinstance(shared_store, PicoFrameStore):
@@ -729,6 +732,7 @@ class VRMotionSource(MotionSourceBase):
         self._vr_align_ready = False
         self._vr_in_transition = False
         self._vr_transition_count = 0
+        self.remote_motion_finished = False
         if self._shared_store is not None:
             self._shared_store.publish_control(active=False)
         print("[VRMotionSource] VR start requested")
@@ -746,6 +750,32 @@ class VRMotionSource(MotionSourceBase):
         if self._shared_store is not None:
             self._shared_store.publish_control(active=False)
         print("[VRMotionSource] VR stop requested")
+
+    def can_return_to_default(self) -> bool:
+        return bool(
+            self.remote_reference_source == "motion"
+            and self.remote_motion_finished
+            and self.policy.current_done
+        )
+
+    def notify_default_pose(self) -> bool:
+        """Tell the host motion server that G1 is returning to its default pose."""
+        if self._req_sock is None:
+            print("[VRMotionSource] cannot notify default pose: request socket unavailable")
+            return False
+        try:
+            self._req_sock.send_string(
+                json.dumps({"command": "default"}), flags=zmq.NOBLOCK
+            )
+        except zmq.Again:
+            print("[VRMotionSource] cannot notify default pose: request socket busy")
+            return False
+        except Exception as exc:
+            print(f"[VRMotionSource] default-pose notification failed: {exc}")
+            return False
+        self.remote_motion_finished = False
+        print("[VRMotionSource] default-pose notification sent")
+        return True
 
     def _drain_control(self) -> None:
         if self._ctrl_sock is None:
@@ -1053,6 +1083,9 @@ class VRMotionSource(MotionSourceBase):
             if protocol is not None and protocol != "g1-reference-v1":
                 print(f"[VRMotionSource] unsupported reference protocol: {protocol!r}")
                 continue
+            reply_source = str(payload.get("source", "")).strip().lower()
+            reply_motion_name = str(payload.get("motion", "")).strip()
+            reply_finished = bool(payload.get("finished", False))
 
             parsed_frames = self._parse_qpos_frames(payload, parts[1].buffer)
             if len(parsed_frames) == 0:
@@ -1093,11 +1126,28 @@ class VRMotionSource(MotionSourceBase):
             }
             self.policy.append_ref_frames(seg)
             last_aligned_frame = out_frames[-1]
+            if reply_source:
+                self.remote_reference_source = reply_source
+            if reply_motion_name:
+                self.remote_motion_name = reply_motion_name
+            if reply_source == "motion" and reply_finished:
+                self.remote_motion_finished = True
+                self._vr_user_enabled = False
+                self._pending_start_request = False
+                self._vr_active = False
+                self._req_inflight = False
+                self._req_inflight_steps_left = 0
+                if self._shared_store is not None:
+                    self._shared_store.publish_control(active=False)
+                print(
+                    f"[VRMotionSource] motion finished: "
+                    f"{self.remote_motion_name or '<unnamed>'}"
+                )
             if self._shared_store is not None:
                 self._shared_store.publish_frame(
                     last_aligned_frame,
                     joint_names=self.policy.obs_joint_names,
-                    active=True,
+                    active=self._vr_active,
                 )
             self._bump_vr_stat("append")
             self._bump_vr_stat("append_frames", len(out_frames))

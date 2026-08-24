@@ -16,7 +16,11 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from common.utils import DictToClass
-from runtime.motion_sources import ISAACLAB_G1_JOINT_NAMES, MotionSourceBase
+from runtime.motion_sources import (
+    ISAACLAB_G1_JOINT_NAMES,
+    MotionSourceBase,
+    VRMotionSource,
+)
 from runtime.policy import _load_policy_metadata
 
 
@@ -159,6 +163,40 @@ class PolicyMetadataFallbackTests(unittest.TestCase):
 
             self.assertEqual(metadata["joint_names"], ["sidecar_joint"])
             self.assertEqual(metadata["action_scale"], [0.5])
+
+
+class RemoteMotionLifecycleTests(unittest.TestCase):
+    def test_return_to_default_requires_finished_motion_and_drained_reference(self):
+        source = object.__new__(VRMotionSource)
+        source.remote_reference_source = "motion"
+        source.remote_motion_finished = True
+        source.policy = SimpleNamespace(current_done=True)
+        self.assertTrue(source.can_return_to_default())
+
+        source.policy.current_done = False
+        self.assertFalse(source.can_return_to_default())
+        source.policy.current_done = True
+        source.remote_motion_finished = False
+        self.assertFalse(source.can_return_to_default())
+        source.remote_motion_finished = True
+        source.remote_reference_source = "pico"
+        self.assertFalse(source.can_return_to_default())
+
+    def test_default_pose_notification_uses_reference_request_channel(self):
+        class FakeRequestSocket:
+            def __init__(self):
+                self.messages = []
+
+            def send_string(self, value, flags):
+                self.messages.append((value, flags))
+
+        source = object.__new__(VRMotionSource)
+        source._req_sock = FakeRequestSocket()
+        source.remote_motion_finished = True
+
+        self.assertTrue(source.notify_default_pose())
+        self.assertEqual(json.loads(source._req_sock.messages[0][0]), {"command": "default"})
+        self.assertFalse(source.remote_motion_finished)
 
 
 if __name__ == "__main__":
