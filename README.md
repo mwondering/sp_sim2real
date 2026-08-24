@@ -21,4 +21,7 @@ bash scripts/launch_pico.sh --source pico
 ```
 
 The launcher creates two local tmux windows: `xr-service` and `reference`.
+In `--source motion` mode it creates `motion-select` and `reference`; motions
+play once, G1 remote Up returns to the default pose, and A starts the selected
+motion again.
 See [README_zh.md](README_zh.md) and [sim2real/teleop/README.md](sim2real/teleop/README.md).

@@ -55,9 +55,18 @@ G1 上的任何程序。浏览器访问 `http://192.168.31.20:8080` 查看 refer
 
 ```bash
 cd sim2real
-MOTION_FILE="$PWD/config/g1/motions/omni_extreme/omni_extreme_1.npz" \
-bash scripts/launch_pico.sh --source motion --motion-file "$MOTION_FILE"
+SERVER_IP=192.168.31.20 \
+REFERENCE_BIND_IP=0.0.0.0 \
+VR_REQ_PORT=28701 VR_POSE_PORT=28702 VR_CTRL_PORT=28703 \
+MOTION_SELECT_PORT=28704 VIEWER_PORT=8080 \
+bash scripts/launch_pico.sh --source motion \
+  --motion-file "$PWD/config/g1/motions/omni_extreme/omni_extreme_1.npz"
 ```
+
+motion 单次播放，不再自动循环。脚本会打开 `motion-select` 交互窗口，可输入编号或名称选择
+下一条 motion。G1 遥控器操作顺序为：`A` 开始所选 motion；播放完成后按方向键 `Up`
+平滑回到默认位姿；随后可在 `motion-select` 中选择下一条，再按 `A` 开始。未回到默认位姿前
+会拒绝切换 motion。`28704` 仅供外部主机本地选择器使用，默认绑定 `127.0.0.1`。
 
 分支保留了原仓库全部 31 个 motion 文件。当前 reference server 面向 G1，因此只有包含完整
 G1 joint names 的 robot motion 可以直接发送；L7 motion 作为原始 motion 数据保留。

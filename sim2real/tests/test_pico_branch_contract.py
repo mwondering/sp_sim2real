@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
@@ -18,7 +19,7 @@ for path in (TELEOP_ROOT, SRC_ROOT):
 
 from paths import SUPPORTED_ROBOTS
 from retarget.xrobot_retarget import XRobotRetargetWorkerRuntime
-from serve_motion_reference import load_motion
+from serve_motion_reference import MotionReferenceServer, load_motion
 from utils.robot_config import load_teleop_robot_config
 
 
@@ -54,11 +55,11 @@ class PicoBranchContractTests(unittest.TestCase):
         forbidden_names = {
             "deploy.py",
             "sim2sim.py",
-            "motion_select.py",
             "tap_terrain.py",
             "teleop_upper_lower_locomani.py",
         }
         self.assertFalse(any(Path(path).name in forbidden_names for path in self.files))
+        self.assertIn("sim2real/teleop/motion_select.py", self.files)
 
     def test_preserves_all_motion_files(self):
         root_motion = [path for path in self.files if path.startswith("motion/")]
@@ -93,6 +94,46 @@ class PicoBranchContractTests(unittest.TestCase):
         self.assertEqual(qpos.dtype, np.float32)
         self.assertTrue(np.isfinite(qpos).all())
         self.assertGreater(fps, 0.0)
+
+    def test_motion_server_plays_once_and_requires_default_before_switch(self):
+        motion_root = SIM2REAL_ROOT / "config/g1/motions"
+        first = motion_root / "omni_extreme/omni_extreme_1.npz"
+        second_name = "omni_extreme/omni_extreme_2"
+        server = MotionReferenceServer(
+            SimpleNamespace(
+                config=SIM2REAL_ROOT / "config/g1/retarget/teleop.yaml",
+                req_bind_addr=None,
+                rep_bind_addr=None,
+                ctrl_bind_addr=None,
+                motion_root=motion_root,
+                motion=first,
+                loop=False,
+                no_viewer=True,
+                viewer_host="127.0.0.1",
+                viewer_port=18080,
+                select_bind_addr="tcp://127.0.0.1:28704",
+            )
+        )
+
+        _, finished = server._next_frame(start=True)
+        self.assertFalse(finished)
+        for _ in range(server.qpos.shape[0] - 1):
+            _, finished = server._next_frame(start=False)
+        self.assertTrue(finished)
+        self.assertEqual(server.state, "finished")
+
+        rejected = server.handle_selection_request(
+            {"command": "select", "motion": second_name}
+        )
+        self.assertFalse(rejected["ok"])
+
+        server.mark_default()
+        accepted = server.handle_selection_request(
+            {"command": "select", "motion": second_name}
+        )
+        self.assertTrue(accepted["ok"])
+        self.assertEqual(accepted["motion"], second_name)
+        self.assertEqual(server.state, "ready")
 
     def test_g1_retarget_runtime_initializes_without_policy_runtime(self):
         config = load_teleop_robot_config("g1")

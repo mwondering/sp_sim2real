@@ -16,6 +16,10 @@ VR_CTRL_PORT="${VR_CTRL_PORT:-28703}"
 VIEWER_BIND_IP="${VIEWER_BIND_IP:-0.0.0.0}"
 VIEWER_PORT="${VIEWER_PORT:-8080}"
 MOTION_FILE="${MOTION_FILE:-}"
+MOTION_ROOT="${MOTION_ROOT:-${SIM2REAL_ROOT}/config/g1/motions}"
+MOTION_SELECT_BIND_IP="${MOTION_SELECT_BIND_IP:-127.0.0.1}"
+MOTION_SELECT_CONNECT_IP="${MOTION_SELECT_CONNECT_IP:-127.0.0.1}"
+MOTION_SELECT_PORT="${MOTION_SELECT_PORT:-28704}"
 XR_SERVICE_DIR="${XR_SERVICE_DIR:-/opt/apps/roboticsservice}"
 
 STOP=false
@@ -38,7 +42,9 @@ Options:
 
 Configurable environment variables:
   SESSION, REFERENCE_BIND_IP, SERVER_IP, VR_REQ_PORT, VR_POSE_PORT,
-  VR_CTRL_PORT, VIEWER_BIND_IP, VIEWER_PORT, XR_SERVICE_DIR
+  VR_CTRL_PORT, VIEWER_BIND_IP, VIEWER_PORT, XR_SERVICE_DIR,
+  MOTION_ROOT, MOTION_SELECT_BIND_IP, MOTION_SELECT_CONNECT_IP,
+  MOTION_SELECT_PORT
 EOF
 }
 
@@ -64,7 +70,6 @@ fi
 if "${STOP}"; then
   if tmux has-session -t "${SESSION}" 2>/dev/null; then
     tmux send-keys -t "${SESSION}:reference" C-c 2>/dev/null || true
-    tmux send-keys -t "${SESSION}:xr-service" C-c 2>/dev/null || true
     tmux kill-session -t "${SESSION}"
   fi
   exit 0
@@ -84,6 +89,13 @@ if [[ "${SOURCE_MODE}" != "pico" ]]; then
     exit 1
   fi
   MOTION_FILE="$(realpath "${MOTION_FILE}")"
+  if [[ "${SOURCE_MODE}" == "motion" ]]; then
+    if [[ ! -d "${MOTION_ROOT}" ]]; then
+      echo "Motion root not found: ${MOTION_ROOT}" >&2
+      exit 1
+    fi
+    MOTION_ROOT="$(realpath "${MOTION_ROOT}")"
+  fi
 elif [[ ! -f "${XR_SERVICE_DIR}/runService.sh" ]]; then
   echo "XR service launcher not found: ${XR_SERVICE_DIR}/runService.sh" >&2
   exit 1
@@ -99,27 +111,38 @@ fi
 
 if [[ "${SOURCE_MODE}" == "pico" ]]; then
   printf -v xr_dir '%q' "${XR_SERVICE_DIR}"
-  XR_CMD="cd ${xr_dir} && exec bash runService.sh"
+  SOURCE_WINDOW="xr-service"
+  SOURCE_CMD="cd ${xr_dir} && exec bash runService.sh"
+  ATTACH_WINDOW="reference"
+elif [[ "${SOURCE_MODE}" == "motion" ]]; then
+  printf -v motion_root_q '%q' "${MOTION_ROOT}"
+  printf -v select_addr_q '%q' "tcp://${MOTION_SELECT_CONNECT_IP}:${MOTION_SELECT_PORT}"
+  SOURCE_WINDOW="motion-select"
+  SOURCE_CMD="cd ${SIM2REAL_ROOT@Q} && exec uv run python teleop/motion_select.py --motion-root ${motion_root_q} --connect-addr ${select_addr_q}"
+  ATTACH_WINDOW="motion-select"
 else
   printf -v source_q '%q' "${SOURCE_MODE}"
-  XR_CMD="echo XR\ service\ is\ not\ required\ for\ SOURCE_MODE=${source_q}; exec \"\${SHELL:-/bin/bash}\""
+  SOURCE_WINDOW="source-info"
+  SOURCE_CMD="echo XR\ service\ is\ not\ required\ for\ SOURCE_MODE=${source_q}; exec \"\${SHELL:-/bin/bash}\""
+  ATTACH_WINDOW="reference"
 fi
 
 printf -v sim_root_q '%q' "${SIM2REAL_ROOT}"
 printf -v ref_cmd \
-  'cd %s && SOURCE_MODE=%q MOTION_FILE=%q REFERENCE_BIND_IP=%q VR_REQ_PORT=%q VR_POSE_PORT=%q VR_CTRL_PORT=%q VIEWER_BIND_IP=%q VIEWER_PORT=%q exec bash scripts/run_reference_server.sh' \
-  "${sim_root_q}" "${SOURCE_MODE}" "${MOTION_FILE}" "${REFERENCE_BIND_IP}" \
+  'cd %s && SOURCE_MODE=%q MOTION_FILE=%q MOTION_ROOT=%q MOTION_SELECT_BIND_IP=%q MOTION_SELECT_PORT=%q REFERENCE_BIND_IP=%q VR_REQ_PORT=%q VR_POSE_PORT=%q VR_CTRL_PORT=%q VIEWER_BIND_IP=%q VIEWER_PORT=%q exec bash scripts/run_reference_server.sh' \
+  "${sim_root_q}" "${SOURCE_MODE}" "${MOTION_FILE}" "${MOTION_ROOT}" \
+  "${MOTION_SELECT_BIND_IP}" "${MOTION_SELECT_PORT}" "${REFERENCE_BIND_IP}" \
   "${VR_REQ_PORT}" "${VR_POSE_PORT}" "${VR_CTRL_PORT}" "${VIEWER_BIND_IP}" \
   "${VIEWER_PORT}"
 
-tmux new-session -d -s "${SESSION}" -n xr-service
+tmux new-session -d -s "${SESSION}" -n "${SOURCE_WINDOW}"
 tmux new-window -t "${SESSION}" -n reference
 tmux set-option -t "${SESSION}" mouse on
-tmux send-keys -t "${SESSION}:xr-service" "${XR_CMD}" C-m
 tmux send-keys -t "${SESSION}:reference" "${ref_cmd}" C-m
-tmux select-window -t "${SESSION}:reference"
+tmux send-keys -t "${SESSION}:${SOURCE_WINDOW}" "${SOURCE_CMD}" C-m
+tmux select-window -t "${SESSION}:${ATTACH_WINDOW}"
 
-echo "PICO/reference session started: ${SESSION} (xr-service, reference)"
+echo "PICO/reference session started: ${SESSION} (${SOURCE_WINDOW}, reference)"
 echo "Reference viewer: http://${SERVER_IP}:${VIEWER_PORT}"
 echo "Stop it: SESSION=${SESSION} bash scripts/launch_pico.sh --stop"
 if ! "${DETACH}"; then

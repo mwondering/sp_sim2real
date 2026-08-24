@@ -11,6 +11,9 @@ VR_POSE_PORT="${VR_POSE_PORT:-28702}"
 VR_CTRL_PORT="${VR_CTRL_PORT:-28703}"
 VIEWER_BIND_IP="${VIEWER_BIND_IP:-0.0.0.0}"
 VIEWER_PORT="${VIEWER_PORT:-8080}"
+MOTION_ROOT="${MOTION_ROOT:-${SIM2REAL_ROOT}/config/g1/motions}"
+MOTION_SELECT_BIND_IP="${MOTION_SELECT_BIND_IP:-127.0.0.1}"
+MOTION_SELECT_PORT="${MOTION_SELECT_PORT:-28704}"
 
 COMMON_ARGS=(
   --req-bind-addr "tcp://${REFERENCE_BIND_IP}:${VR_REQ_PORT}"
@@ -37,7 +40,8 @@ case "${SOURCE_MODE}" in
     exec uv run python teleop/serve_motion_reference.py \
       "${MOTION_FILE}" \
       --config config/g1/retarget/teleop.yaml \
-      --loop \
+      --motion-root "${MOTION_ROOT}" \
+      --select-bind-addr "tcp://${MOTION_SELECT_BIND_IP}:${MOTION_SELECT_PORT}" \
       "${COMMON_ARGS[@]}" \
       "$@"
     ;;

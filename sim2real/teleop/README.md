@@ -7,6 +7,7 @@
 - `replay_xrobot_motion.py`：回放原始流并重新 retarget，可同时作为 ZMQ server。
 - `resample_xrobot_raw_npz.py`：按时间戳重采样原始录制。
 - `serve_motion_reference.py`：直接播放已有 G1 robot motion。
+- `motion_select.py`：在 motion server 运行期间按编号或名称切换下一条 motion。
 - `retarget/`：MuJoCo/Mink G1 retarget 与 Viser。
 - `utils/`：XR 数据解析、共享缓冲区和 SDK 加载。
 
@@ -62,3 +63,6 @@ uv run python teleop/serve_xrobot_teleop.py \
 
 正常使用建议执行上层 `scripts/launch_pico.sh`，它会同时管理 PC Service 和 reference
 server。策略推理和机器人控制不在本分支中运行。
+
+motion 模式下，launcher 会用 `28704` 本地端口启动 `motion_select.py`。motion 单次播放；
+完成后在 G1 遥控器按 `Up` 返回默认位姿，选择下一条 motion 后按 `A` 再次开始。

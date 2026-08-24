@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import threading
 import time
+from typing import Any
 
 import numpy as np
 
@@ -18,6 +19,55 @@ from utils.robot_config import load_teleop_robot_config
 
 
 PROTOCOL = "g1-reference-v1"
+MOTION_SELECT_PROTOCOL = "g1-motion-select-v1"
+
+
+def discover_motion_files(root: Path) -> list[Path]:
+    root = root.expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"motion root is not a directory: {root}")
+    return sorted(path.resolve() for path in root.rglob("*.npz") if path.is_file())
+
+
+def motion_display_name(path: Path, root: Path) -> str:
+    path = path.expanduser().resolve()
+    root = root.expanduser().resolve()
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return path.name
+    return relative.with_suffix("").as_posix()
+
+
+def resolve_motion_choice(choice: str, root: Path) -> Path:
+    root = root.expanduser().resolve()
+    files = discover_motion_files(root)
+    requested = str(choice).strip()
+    if not requested:
+        raise ValueError("motion choice is empty")
+
+    direct = Path(requested).expanduser()
+    if direct.is_absolute():
+        resolved = direct.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"motion must be inside {root}: {resolved}") from exc
+        if resolved in files:
+            return resolved
+
+    normalized = requested.removesuffix(".npz").replace("\\", "/")
+    exact = [path for path in files if motion_display_name(path, root) == normalized]
+    if len(exact) == 1:
+        return exact[0]
+
+    basename = [path for path in files if path.stem == normalized]
+    if len(basename) == 1:
+        return basename[0]
+    if len(basename) > 1:
+        names = [motion_display_name(path, root) for path in basename]
+        raise ValueError(f"ambiguous motion {requested!r}: {names}")
+    raise ValueError(f"unknown motion {requested!r}")
 
 
 def _decode_names(values: np.ndarray) -> list[str]:
@@ -78,10 +128,16 @@ class MotionReferenceServer:
             rep_bind_addr=args.rep_bind_addr or config.rep_bind_addr,
             ctrl_bind_addr=args.ctrl_bind_addr or config.ctrl_bind_addr,
         )
-        self.qpos, self.fps = load_motion(args.motion.expanduser().resolve(), self.config.dof_names)
+        self.motion_root = args.motion_root.expanduser().resolve()
+        self.motion_path = resolve_motion_choice(str(args.motion), self.motion_root)
+        self.motion_name = motion_display_name(self.motion_path, self.motion_root)
+        self.qpos, self.fps = load_motion(self.motion_path, self.config.dof_names)
         self.index = 0
         self.sequence = 0
         self.loop = bool(args.loop)
+        self.playing = False
+        self.finished = False
+        self.at_default = True
         self.stop_event = threading.Event()
         self.viewer = None if args.no_viewer else MJViserViewer(
             "g1", host=args.viewer_host, port=args.viewer_port
@@ -90,6 +146,106 @@ class MotionReferenceServer:
         self.req_sock = None
         self.rep_sock = None
         self.ctrl_sock = None
+        self.select_sock = None
+
+    @property
+    def state(self) -> str:
+        if self.playing:
+            return "playing"
+        if self.finished:
+            return "finished"
+        if self.at_default:
+            return "ready"
+        return "idle"
+
+    def _status_payload(self) -> dict[str, Any]:
+        return {
+            "protocol": MOTION_SELECT_PROTOCOL,
+            "ok": True,
+            "state": self.state,
+            "motion": self.motion_name,
+            "frames": int(self.qpos.shape[0]),
+            "fps": float(self.fps),
+        }
+
+    def _select_motion(self, choice: str) -> dict[str, Any]:
+        if self.playing or not self.at_default:
+            return {
+                **self._status_payload(),
+                "ok": False,
+                "detail": (
+                    "motion switch rejected; wait for playback to finish, then press "
+                    "G1 remote Up to return to the default pose"
+                ),
+            }
+        try:
+            path = resolve_motion_choice(choice, self.motion_root)
+            qpos, fps = load_motion(path, self.config.dof_names)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            return {
+                **self._status_payload(),
+                "ok": False,
+                "detail": str(exc),
+            }
+
+        self.motion_path = path
+        self.motion_name = motion_display_name(path, self.motion_root)
+        self.qpos = qpos
+        self.fps = fps
+        self.index = 0
+        self.playing = False
+        self.finished = False
+        self.at_default = True
+        print(
+            f"[MotionReference] selected '{self.motion_name}' "
+            f"frames={self.qpos.shape[0]} fps={self.fps:.3f}"
+        )
+        return {
+            **self._status_payload(),
+            "detail": "selected; press G1 remote A to start tracking",
+        }
+
+    def handle_selection_request(self, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {
+                **self._status_payload(),
+                "ok": False,
+                "detail": "selection request must be a JSON object",
+            }
+        protocol = payload.get("protocol")
+        if protocol not in (None, MOTION_SELECT_PROTOCOL):
+            return {
+                **self._status_payload(),
+                "ok": False,
+                "detail": f"unsupported protocol: {protocol!r}",
+            }
+        command = str(payload.get("command", "status")).strip().lower()
+        if command == "status":
+            return self._status_payload()
+        if command == "list":
+            return {
+                **self._status_payload(),
+                "motions": [
+                    motion_display_name(path, self.motion_root)
+                    for path in discover_motion_files(self.motion_root)
+                ],
+            }
+        if command == "select":
+            return self._select_motion(str(payload.get("motion", "")))
+        return {
+            **self._status_payload(),
+            "ok": False,
+            "detail": f"unknown selection command: {command!r}",
+        }
+
+    def mark_default(self) -> None:
+        self.index = 0
+        self.playing = False
+        self.finished = False
+        self.at_default = True
+        print(
+            f"[MotionReference] G1 returned to default; '{self.motion_name}' is ready"
+        )
 
     def _control_loop(self) -> None:
         import zmq
@@ -106,19 +262,62 @@ class MotionReferenceServer:
         period = 1.0 / float(self.config.ctrl_fps)
         while not self.stop_event.is_set():
             payload["t_ms"] = int(time.time() * 1000)
+            payload["motion"] = self.motion_name
+            payload["state"] = self.state
             try:
                 self.ctrl_sock.send_string(json.dumps(payload), flags=zmq.NOBLOCK)
             except zmq.Again:
                 pass
             self.stop_event.wait(period)
 
-    def _next_frame(self) -> np.ndarray:
+    def _next_frame(self, *, start: bool) -> tuple[np.ndarray, bool]:
+        if start:
+            self.index = 0
+            self.playing = True
+            self.finished = False
+            self.at_default = False
+            print(f"[MotionReference] playing '{self.motion_name}'")
+
         frame = self.qpos[self.index]
-        if self.index + 1 < self.qpos.shape[0]:
+        is_last = self.index + 1 >= self.qpos.shape[0]
+        if not self.playing:
+            return frame, self.finished
+        if not is_last:
             self.index += 1
         elif self.loop:
             self.index = 0
-        return frame
+        else:
+            self.playing = False
+            self.finished = True
+            print(
+                f"[MotionReference] finished '{self.motion_name}'; "
+                "press G1 remote Up to return to default"
+            )
+        return frame, self.finished
+
+    def _handle_reference_request(self, req: Any) -> tuple[np.ndarray, dict[str, Any]] | None:
+        if not isinstance(req, dict):
+            return None
+        if str(req.get("command", "")).strip().lower() == "default":
+            self.mark_default()
+            return None
+
+        start = bool(req.get("start", False))
+        frame, finished = self._next_frame(start=start)
+        qpos = np.ascontiguousarray(frame.reshape(1, -1), dtype=np.float32)
+        header = {
+            "protocol": PROTOCOL,
+            "source": "motion",
+            "motion": self.motion_name,
+            "state": self.state,
+            "finished": bool(finished),
+            "seq": self.sequence,
+            "start": start,
+            "num_frames": 1,
+            "qpos_size": int(qpos.shape[1]),
+        }
+        self.sequence += 1
+        return qpos, header
 
     def run(self) -> None:
         import zmq
@@ -127,16 +326,23 @@ class MotionReferenceServer:
         self.req_sock = self.zmq_context.socket(zmq.PULL)
         self.rep_sock = self.zmq_context.socket(zmq.PUSH)
         self.ctrl_sock = self.zmq_context.socket(zmq.PUSH)
-        for sock in (self.req_sock, self.rep_sock, self.ctrl_sock):
+        self.select_sock = self.zmq_context.socket(zmq.REP)
+        for sock in (self.req_sock, self.rep_sock, self.ctrl_sock, self.select_sock):
             sock.setsockopt(zmq.LINGER, 0)
         self.req_sock.bind(self.config.req_bind_addr)
         self.rep_sock.bind(self.config.rep_bind_addr)
         self.ctrl_sock.bind(self.config.ctrl_bind_addr)
+        self.select_sock.bind(self.args.select_bind_addr)
+
+        poller = zmq.Poller()
+        poller.register(self.req_sock, zmq.POLLIN)
+        poller.register(self.select_sock, zmq.POLLIN)
 
         print("Motion reference server initialized")
-        print(f"  motion: {self.args.motion}")
+        print(f"  motion: {self.motion_name} ({self.motion_path})")
         print(f"  frames/fps: {self.qpos.shape[0]}/{self.fps:.3f}")
         print(f"  req/rep/ctrl: {self.config.req_bind_addr} {self.config.rep_bind_addr} {self.config.ctrl_bind_addr}")
+        print(f"  selector: {self.args.select_bind_addr}")
         if self.viewer is not None:
             print(f"  viewer_url: http://localhost:{self.args.viewer_port}")
 
@@ -144,29 +350,39 @@ class MotionReferenceServer:
         control_thread.start()
         try:
             while True:
-                req = json.loads(self.req_sock.recv_string())
-                frame = self._next_frame()
-                qpos = np.ascontiguousarray(frame.reshape(1, -1), dtype=np.float32)
-                if self.viewer is not None:
-                    self.viewer.update_qpos(frame)
-                header = json.dumps(
-                    {
-                        "protocol": PROTOCOL,
-                        "source": "motion",
-                        "seq": self.sequence,
-                        "start": bool(req.get("start", False)),
-                        "num_frames": 1,
-                        "qpos_size": int(qpos.shape[1]),
-                    }
-                ).encode("utf-8")
-                self.rep_sock.send_multipart([header, qpos], copy=False)
-                self.sequence += 1
+                events = dict(poller.poll(timeout=100))
+                if self.select_sock in events:
+                    try:
+                        request = self.select_sock.recv_json()
+                        reply = self.handle_selection_request(request)
+                    except Exception as exc:
+                        reply = {
+                            **self._status_payload(),
+                            "ok": False,
+                            "detail": str(exc),
+                        }
+                    self.select_sock.send_json(reply)
+
+                if self.req_sock in events:
+                    try:
+                        req = json.loads(self.req_sock.recv_string())
+                    except Exception:
+                        continue
+                    result = self._handle_reference_request(req)
+                    if result is None:
+                        continue
+                    qpos, header = result
+                    if self.viewer is not None:
+                        self.viewer.update_qpos(qpos[0])
+                    self.rep_sock.send_multipart(
+                        [json.dumps(header).encode("utf-8"), qpos], copy=False
+                    )
         except KeyboardInterrupt:
             pass
         finally:
             self.stop_event.set()
             control_thread.join(timeout=1.0)
-            for sock in (self.req_sock, self.rep_sock, self.ctrl_sock):
+            for sock in (self.req_sock, self.rep_sock, self.ctrl_sock, self.select_sock):
                 if sock is not None:
                     sock.close(0)
             if self.viewer is not None:
@@ -176,6 +392,17 @@ class MotionReferenceServer:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("motion", type=Path)
+    parser.add_argument(
+        "--motion-root",
+        type=Path,
+        default=Path("config/g1/motions"),
+        help="Root containing selectable G1 motion NPZ files.",
+    )
+    parser.add_argument(
+        "--select-bind-addr",
+        default="tcp://127.0.0.1:28704",
+        help="Local ZMQ REP endpoint used by motion_select.py.",
+    )
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--req-bind-addr", default=None)
