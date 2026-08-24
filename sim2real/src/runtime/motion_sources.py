@@ -138,6 +138,39 @@ def _motion_frame_slice(start: int, end: int) -> slice:
     return slice(int(start), None if int(end) == -1 else int(end))
 
 
+def motion_name_from_path(path: Path, root: Path) -> str:
+    """Return the stable selector name for one motion below ``root``."""
+    path = path.expanduser().resolve()
+    root = root.expanduser().resolve()
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Motion is outside motion_root={root}: {path}") from exc
+    return relative.with_suffix("").as_posix()
+
+
+def discover_motion_files(root: Path) -> Dict[str, Path]:
+    """Discover local NPZ motions without loading their frame arrays."""
+    root = root.expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"motion_root is not a directory: {root}")
+
+    motions: Dict[str, Path] = {}
+    for path in sorted(root.rglob("*.npz")):
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        name = motion_name_from_path(resolved, root)
+        if name == "default":
+            raise ValueError(
+                f"Local motion name 'default' is reserved for the configured default clip: {resolved}"
+            )
+        if name in motions:
+            raise ValueError(f"Duplicate local motion name {name!r}: {motions[name]} and {resolved}")
+        motions[name] = resolved
+    return motions
+
+
 def _load_npz_motion(
     data: np.lib.npyio.NpzFile,
     *,
@@ -268,43 +301,19 @@ class MotionSourceBase(ABC):
             motion_name = mc.name
             mp = Path(mc.path)
             cfg_dir = Path(getattr(self.config, "_config_dir"))
-            path = str(mp if mp.is_absolute() else (cfg_dir / mp))
-            t0 = int(getattr(mc, "start", 0))
-            t1 = int(getattr(mc, "end", -1))
-            motion_type = str(
-                getattr(mc, "motion_type", getattr(self.config, "motion_type", "auto"))
-            ).strip().lower()
-            if motion_type not in ("auto", "isaaclab", "mujoco"):
-                raise ValueError(
-                    f"Motion '{motion_name}' motion_type must be auto, isaaclab, or mujoco; "
-                    f"got {motion_type!r}."
-                )
-            root_body_index = int(
-                getattr(mc, "root_body_index", getattr(self.config, "root_body_index", 0))
+            path = mp if mp.is_absolute() else (cfg_dir / mp)
+            motions[motion_name] = self._load_motion_file(
+                motion_name,
+                path,
+                start=int(getattr(mc, "start", 0)),
+                end=int(getattr(mc, "end", -1)),
+                motion_type=str(
+                    getattr(mc, "motion_type", getattr(self.config, "motion_type", "auto"))
+                ),
+                root_body_index=int(
+                    getattr(mc, "root_body_index", getattr(self.config, "root_body_index", 0))
+                ),
             )
-
-            with np.load(path, allow_pickle=True) as data:
-                if not isinstance(data, np.lib.npyio.NpzFile):
-                    raise ValueError(f"[{self.__class__.__name__}] Only .npz is supported: {path}")
-                joint_pos, root_pos, root_quat, source_joint_names, schema = _load_npz_motion(
-                    data,
-                    motion_name=motion_name,
-                    frame_slice=_motion_frame_slice(t0, t1),
-                    motion_type=motion_type,
-                    dataset_joint_names=self.policy.dataset_joint_names,
-                    root_body_index=root_body_index,
-                )
-            joint_pos = remap_joint_array_by_names(joint_pos, source_joint_names, self.policy.obs_joint_names)
-            print(
-                f"[{self.__class__.__name__}] Loaded motion '{motion_name}' "
-                f"schema={schema}, frames={joint_pos.shape[0]}"
-            )
-
-            motions[motion_name] = {
-                "joint_pos": joint_pos,
-                "root_quat": root_quat,
-                "root_pos": root_pos,
-            }
 
         for m in getattr(self.config, "motion_clips", []):
             mc = DictToClass(m)
@@ -330,6 +339,60 @@ class MotionSourceBase(ABC):
             raise ValueError(f"[{self.__class__.__name__}] motions must include a 'default' clip (length==1).")
 
         return motions
+
+    def _load_motion_file(
+        self,
+        motion_name: str,
+        path: Path,
+        *,
+        start: int = 0,
+        end: int = -1,
+        motion_type: Optional[str] = None,
+        root_body_index: Optional[int] = None,
+    ) -> Dict[str, np.ndarray]:
+        """Load and remap one motion on demand for the current policy."""
+        path = path.expanduser().resolve()
+        resolved_type = str(
+            motion_type
+            if motion_type is not None
+            else getattr(self.config, "motion_type", "auto")
+        ).strip().lower()
+        if resolved_type not in ("auto", "isaaclab", "mujoco"):
+            raise ValueError(
+                f"Motion '{motion_name}' motion_type must be auto, isaaclab, or mujoco; "
+                f"got {resolved_type!r}."
+            )
+        resolved_root_body_index = int(
+            getattr(self.config, "root_body_index", 0)
+            if root_body_index is None
+            else root_body_index
+        )
+
+        with np.load(path, allow_pickle=True) as data:
+            if not isinstance(data, np.lib.npyio.NpzFile):
+                raise ValueError(f"[{self.__class__.__name__}] Only .npz is supported: {path}")
+            joint_pos, root_pos, root_quat, source_joint_names, schema = _load_npz_motion(
+                data,
+                motion_name=motion_name,
+                frame_slice=_motion_frame_slice(start, end),
+                motion_type=resolved_type,
+                dataset_joint_names=self.policy.dataset_joint_names,
+                root_body_index=resolved_root_body_index,
+            )
+        joint_pos = remap_joint_array_by_names(
+            joint_pos,
+            source_joint_names,
+            self.policy.obs_joint_names,
+        )
+        print(
+            f"[{self.__class__.__name__}] Loaded motion '{motion_name}' "
+            f"schema={schema}, frames={joint_pos.shape[0]}, path={path}"
+        )
+        return {
+            "joint_pos": joint_pos,
+            "root_quat": root_quat,
+            "root_pos": root_pos,
+        }
 
     @staticmethod
     def _empty_frames(n_joints: int) -> Dict[str, np.ndarray]:
@@ -434,11 +497,27 @@ class UDPMotionSource(MotionSourceBase):
         self.udp_enable = bool(udp_cfg["enable"])
         self.udp_host = str(udp_cfg["host"])
         self.udp_port = int(udp_cfg["port"])
+        self.motion_root: Optional[Path] = None
+        self.motion_files: Dict[str, Path] = {}
+        configured_motion_root = str(udp_cfg.get("motion_root", "")).strip()
+        if configured_motion_root:
+            root = Path(configured_motion_root).expanduser()
+            if not root.is_absolute():
+                root = Path(getattr(policy_cfg, "_config_dir")) / root
+            self.motion_root = root.resolve()
+            self.motion_files = discover_motion_files(self.motion_root)
         self._udp_receiver: Optional[UDPLatestReceiver] = None
         self._latest_motion_packet: Optional[LatestPacket] = None
         self._latest_motion_seq: int = -1
+        self._pending_local_motion: Optional[str] = None
 
         super().__init__(policy, policy_cfg)
+
+        if self.motion_root is not None:
+            print(
+                f"[UDPMotionSource] Discovered {len(self.motion_files)} local motions "
+                f"under {self.motion_root}; files are loaded only when selected"
+            )
 
         if self.udp_enable:
             try:
@@ -452,39 +531,82 @@ class UDPMotionSource(MotionSourceBase):
                 print(f"[UDPMotionSource] Failed to start UDP server: {e}")
 
     def request_motion(self, name: str) -> bool:
-        if name not in self.motions:
+        is_lazy_motion = name in self.motion_files and name not in self.motions
+        if name not in self.motions and not is_lazy_motion:
             print(f"[UDPMotionSource] Unknown motion '{name}'")
             return False
 
-        if (self.policy.current_name == "default" or name == "default") and self.policy.current_done:
-            return self.append_motion_from_tail(name)
+        if not (
+            (self.policy.current_name == "default" or name == "default")
+            and self.policy.current_done
+        ):
+            print(
+                f"[UDPMotionSource] Reject '{name}': "
+                f"current='{self.policy.current_name}', done={self.policy.current_done}"
+            )
+            return False
 
-        print(
-            f"[UDPMotionSource] Reject '{name}': "
-            f"current='{self.policy.current_name}', done={self.policy.current_done}"
-        )
-        return False
+        if is_lazy_motion:
+            try:
+                self.motions[name] = self._load_motion_file(name, self.motion_files[name])
+            except (OSError, ValueError) as exc:
+                print(f"[UDPMotionSource] Failed to load local motion '{name}': {exc}")
+                return False
+
+        appended = self.append_motion_from_tail(name)
+        if is_lazy_motion:
+            # append_motion_from_tail copies the aligned frames into the policy
+            # buffer, so keeping the source arrays would only double onboard RAM.
+            self.motions.pop(name, None)
+        return appended
+
+    def _queue_local_motion(self, name: str) -> bool:
+        if name not in self.motions and name not in self.motion_files:
+            print(f"[UDPMotionSource] Unknown onboard motion '{name}'")
+            return False
+        self._pending_local_motion = name
+        print(f"[UDPMotionSource] Queued onboard motion '{name}'")
+        return True
+
+    def _advance_local_motion_queue(self) -> None:
+        if self.motion_root is None or not self.policy.current_done:
+            return
+
+        if self.policy.current_name != "default":
+            if self.append_motion_from_tail("default"):
+                print("[UDPMotionSource] Onboard motion finished; returning to default")
+                if self._pending_local_motion == "default":
+                    self._pending_local_motion = None
+            return
+
+        if self._pending_local_motion is None:
+            return
+        name = self._pending_local_motion
+        self._pending_local_motion = None
+        self.request_motion(name)
 
     def post_step(self):
-        if self._udp_receiver is None:
-            return
+        if self._udp_receiver is not None:
+            packet = self._udp_receiver.read_latest_data(with_meta=True)
+            if packet is not None and packet.seq != self._latest_motion_seq:
+                self._latest_motion_seq = packet.seq
+                self._latest_motion_packet = packet
+                payload = packet.data
+                if isinstance(payload, dict):
+                    cmd = str(payload.get("motion", "")).strip()
+                else:
+                    cmd = str(payload).strip()
+                if cmd:
+                    normalized = "default" if cmd == "default" else cmd
+                    if self.motion_root is not None:
+                        self._queue_local_motion(normalized)
+                    else:
+                        self.request_motion(normalized)
 
-        packet = self._udp_receiver.read_latest_data(with_meta=True)
-        if packet is None or packet.seq == self._latest_motion_seq:
-            return
-
-        self._latest_motion_seq = packet.seq
-        self._latest_motion_packet = packet
-        payload = packet.data
-        if isinstance(payload, dict):
-            cmd = str(payload.get("motion", "")).strip()
-        else:
-            cmd = str(payload).strip()
-        if not cmd:
-            return
-        self.request_motion("default" if cmd == "default" else cmd)
+        self._advance_local_motion_queue()
 
     def deactivate(self):
+        self._pending_local_motion = None
         if self._udp_receiver is not None:
             self._udp_receiver.close()
 

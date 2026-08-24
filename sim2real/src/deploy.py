@@ -16,6 +16,8 @@ from paths import SIM2REAL_ROOT, SUPPORTED_ROBOTS, controller_config_path, track
 
 np.set_printoptions(formatter={'float': lambda x: "{0:0.2f}".format(x)})
 
+DEFAULT_LOCAL_MOTION_ROOT = SIM2REAL_ROOT.parent / "motion"
+
 def get_config(policy_cfg_path: str) -> DictToClass:
     policy_cfg_path = Path(policy_cfg_path)
     if not policy_cfg_path.is_absolute():
@@ -25,6 +27,53 @@ def get_config(policy_cfg_path: str) -> DictToClass:
     policy_cfg._config_path = str(policy_cfg_path)
     policy_cfg._config_dir = str(policy_cfg_path.parent)
     return policy_cfg
+
+
+def configure_motion_source(tracking_cfg: DictToClass, args) -> None:
+    """Apply an explicit source override while leaving YAML defaults intact."""
+    source_mode = str(getattr(args, "motion_source", "config")).strip().lower()
+    if bool(getattr(args, "force_vr_motion_source", False)):
+        source_mode = "pico"
+
+    if source_mode == "config":
+        return
+    if source_mode == "pico":
+        tracking_cfg.motion_source["type"] = "vr"
+        print("[Deploy] motion source: pico/wireless")
+        return
+    if source_mode != "motion":
+        raise ValueError(
+            f"motion_source must be config, pico, or motion; got {source_mode!r}"
+        )
+
+    motion_root = Path(getattr(args, "motion_root", DEFAULT_LOCAL_MOTION_ROOT))
+    motion_root = motion_root.expanduser().resolve()
+    if not motion_root.is_dir():
+        raise FileNotFoundError(f"Onboard motion root is not a directory: {motion_root}")
+
+    motion_select_host = str(
+        getattr(args, "motion_select_host", "127.0.0.1")
+    ).strip()
+    motion_select_port = int(getattr(args, "motion_select_port", 28562))
+    if not motion_select_host:
+        raise ValueError("motion_select_host must not be empty")
+    if not 1 <= motion_select_port <= 65535:
+        raise ValueError("motion_select_port must be in [1, 65535]")
+
+    udp_cfg = tracking_cfg.motion_source.setdefault("udp", {})
+    udp_cfg.update(
+        {
+            "enable": True,
+            "host": motion_select_host,
+            "port": motion_select_port,
+            "motion_root": str(motion_root),
+        }
+    )
+    tracking_cfg.motion_source["type"] = "udp"
+    print(
+        "[Deploy] motion source: onboard/local "
+        f"root={motion_root}, selector=udp://{udp_cfg['host']}:{udp_cfg['port']}"
+    )
 
 class Controller:
     def _create_tracking_policy(self, name, tracking_cfg):
@@ -128,8 +177,7 @@ class Controller:
         pico_store = getattr(self.args, "pico_store", None)
         if pico_store is not None:
             tracking_cfg._pico_store = pico_store
-        if bool(getattr(self.args, "force_vr_motion_source", False)):
-            tracking_cfg.motion_source["type"] = "vr"
+        configure_motion_source(tracking_cfg, self.args)
         tracking_policy = self._create_tracking_policy("tracking", tracking_cfg)
         self.policies = {"tracking": tracking_policy}
         if tracking_policy.controller_default_qpos is not None:
@@ -504,6 +552,32 @@ if __name__ == "__main__":
         "--no-record",
         action="store_true",
         help="Disable policy run recording.",
+    )
+    parser.add_argument(
+        "--motion-source",
+        choices=("config", "pico", "motion"),
+        default=os.environ.get("G1_MOTION_SOURCE", "config"),
+        help=(
+            "Reference source override. 'config' preserves the tracking YAML default, "
+            "'pico' uses wireless ZMQ, and 'motion' loads NPZ files onboard."
+        ),
+    )
+    parser.add_argument(
+        "--motion-root",
+        type=Path,
+        default=Path(os.environ.get("G1_MOTION_ROOT", DEFAULT_LOCAL_MOTION_ROOT)),
+        help=f"Onboard NPZ directory used by --motion-source motion (default: {DEFAULT_LOCAL_MOTION_ROOT}).",
+    )
+    parser.add_argument(
+        "--motion-select-host",
+        default=os.environ.get("G1_MOTION_SELECT_HOST", "127.0.0.1"),
+        help="UDP bind host for onboard motion selection.",
+    )
+    parser.add_argument(
+        "--motion-select-port",
+        type=int,
+        default=int(os.environ.get("G1_MOTION_SELECT_PORT", "28562")),
+        help="UDP port for onboard motion selection.",
     )
     args = parser.parse_args()
 

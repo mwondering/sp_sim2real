@@ -6,9 +6,10 @@
 ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.onnx
 ```
 
-所有 motion 和 PICO/retarget 服务位于配套的 `pico` 分支。外部服务器通过三路 ZMQ TCP
-发送 reference，机载端只负责接收 reference、读取机器人状态、拼接 observation 和执行 ONNX
-推理。策略与 bridge 之间的 `55001/55002` UDP 始终走本机回环，电机命令不经过 Wi-Fi。
+默认模式仍由配套的 `pico` 分支通过三路 ZMQ TCP 发送 reference。为了排查无线链路延迟，
+本分支另提供显式开启的机载 motion 模式：policy 从仓库根目录 `motion/` 按需读取 NPZ，
+播放阶段直接使用本地内存中的 reference。策略与 bridge 之间的 `55001/55002` UDP 始终走
+本机回环，电机命令不经过 Wi-Fi。
 
 ## 网络变量
 
@@ -108,3 +109,31 @@ taskset -c 4-7 uv run src/deploy.py \
 
 配套的 `pico` 分支使用 `sim2real/scripts/launch_pico.sh` 启动外部主机侧的
 `xr-service` 和 `reference`。两台机器各启动一个分支脚本，总计四个 tmux window。
+
+## 机载 motion 模式（延迟对照）
+
+无线 PICO 模式仍是默认值；只有显式添加 `--source motion` 才启用机载播放：
+
+```bash
+cd sim2real
+STATE_PORT=55001 \
+CMD_PORT=55002 \
+G1_DDS_IFACE=eth0 \
+G1_BRIDGE_BUILD_DIR=build_onboard \
+bash scripts/launch_deploy.sh --real --source motion
+```
+
+该模式不需要设置 `REFERENCE_HOST`。脚本会创建 `bridge`、`policy` 和 `motion-select`
+三个 tmux window，并自动进入 `motion-select` 窗口。motion 默认递归查找仓库根目录
+`motion/`；如需覆盖，可设置 `MOTION_ROOT=/absolute/path/to/motion`。
+
+机器人到达默认位姿后按遥控器 `A` 进入 tracking，然后在 selector 中输入编号或名称。
+选择命令仅通过机载 `127.0.0.1:28562` 发送一次；NPZ 在 policy 进程中按需加载，后续逐帧
+播放不经过 Wi-Fi。选择可以在当前 motion 或默认过渡期间排队；当前 motion 完成后会自动
+回到默认 reference，并在默认过渡完成后启动最新选择。
+
+恢复原无线模式时不传 `--source motion`，或者显式运行：
+
+```bash
+REFERENCE_HOST=<pico-host-ip> bash scripts/launch_deploy.sh --real --source pico
+```

@@ -6,6 +6,8 @@ This branch contains only the SPV5-2 policy runtime for G1:
 - desktop MuJoCo sim2sim with visualization
 - G1 onboard policy inference and the C++ Unitree bridge
 - remote PICO/motion references supplied by the companion `pico` branch
+- optional onboard NPZ playback with `launch_deploy.sh --source motion`; the
+  wireless PICO source remains the default
 
 For one-shot host motion playback, press G1 remote A once to enter policy
 control. Each host selection starts automatically when the local default

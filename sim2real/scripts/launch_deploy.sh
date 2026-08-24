@@ -8,10 +8,14 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 SESSION="${SESSION:-g1_spv5_deploy}"
 TARGET="${TARGET:-real}"                       # real | sim
+SOURCE_MODE="${SOURCE_MODE:-pico}"             # pico | motion
 REFERENCE_HOST="${REFERENCE_HOST:-${G1_REF_HOST:-${SERVER_WIFI_IP:-}}}"
 VR_REQ_PORT="${VR_REQ_PORT:-28701}"
 VR_POSE_PORT="${VR_POSE_PORT:-28702}"
 VR_CTRL_PORT="${VR_CTRL_PORT:-28703}"
+MOTION_ROOT="${MOTION_ROOT:-${REPO_ROOT}/motion}"
+MOTION_SELECT_HOST="${MOTION_SELECT_HOST:-127.0.0.1}"
+MOTION_SELECT_PORT="${MOTION_SELECT_PORT:-28562}"
 STATE_PORT="${STATE_PORT:-55001}"
 CMD_PORT="${CMD_PORT:-55002}"
 G1_DDS_IFACE="${G1_DDS_IFACE:-eth0}"
@@ -29,18 +33,22 @@ usage() {
   cat <<'EOF'
 Usage:
   REFERENCE_HOST=<pico-host-ip> bash scripts/launch_deploy.sh --real
-  REFERENCE_HOST=127.0.0.1       bash scripts/launch_deploy.sh --sim
+  bash scripts/launch_deploy.sh --real --source motion
+  bash scripts/launch_deploy.sh --sim  --source motion
 
 Options:
   --real | --sim                  Select G1 or MuJoCo deployment.
-  --component bridge|policy       Run one component without creating tmux.
-  --detach                        Create the two-window session without attaching.
+  --source pico|motion             Wireless PICO or onboard NPZ playback (default: pico).
+  --component bridge|policy|motion-select
+                                   Run one component without creating tmux.
+  --detach                        Create the tmux session without attaching.
   --replace                       Replace an existing session with the same name.
   --stop                          Stop the deploy tmux session.
   --yes                           Skip the real-robot confirmation prompt.
 
 Configurable environment variables:
   SESSION, REFERENCE_HOST, VR_REQ_PORT, VR_POSE_PORT, VR_CTRL_PORT,
+  SOURCE_MODE, MOTION_ROOT, MOTION_SELECT_HOST, MOTION_SELECT_PORT,
   STATE_PORT, CMD_PORT, G1_DDS_IFACE, G1_BRIDGE_BUILD_DIR,
   BRIDGE_CPU_SET, POLICY_CPU_SET
 EOF
@@ -50,6 +58,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --real) TARGET=real; shift ;;
     --sim) TARGET=sim; shift ;;
+    --source) SOURCE_MODE="${2:-}"; shift 2 ;;
+    --source=*) SOURCE_MODE="${1#*=}"; shift ;;
     --component) COMPONENT="${2:-}"; shift 2 ;;
     --component=*) COMPONENT="${1#*=}"; shift ;;
     --detach) DETACH=true; shift ;;
@@ -65,9 +75,13 @@ case "${TARGET}" in
   real|sim) ;;
   *) echo "TARGET must be real or sim" >&2; exit 2 ;;
 esac
+case "${SOURCE_MODE}" in
+  pico|motion) ;;
+  *) echo "--source must be pico or motion" >&2; exit 2 ;;
+esac
 case "${COMPONENT}" in
-  ""|bridge|policy) ;;
-  *) echo "--component must be bridge or policy" >&2; exit 2 ;;
+  ""|bridge|policy|motion-select) ;;
+  *) echo "--component must be bridge, policy, or motion-select" >&2; exit 2 ;;
 esac
 
 if "${STOP}"; then
@@ -78,17 +92,25 @@ if "${STOP}"; then
   if tmux has-session -t "${SESSION}" 2>/dev/null; then
     tmux send-keys -t "${SESSION}:policy" C-c 2>/dev/null || true
     tmux send-keys -t "${SESSION}:bridge" C-c 2>/dev/null || true
+    tmux send-keys -t "${SESSION}:motion-select" C-c 2>/dev/null || true
     tmux kill-session -t "${SESSION}"
   fi
   exit 0
 fi
 
-if [[ "${TARGET}" == "sim" && -z "${REFERENCE_HOST}" ]]; then
+if [[ "${SOURCE_MODE}" == "pico" && "${TARGET}" == "sim" && -z "${REFERENCE_HOST}" ]]; then
   REFERENCE_HOST="127.0.0.1"
 fi
-if [[ "${COMPONENT}" != "bridge" && -z "${REFERENCE_HOST}" ]]; then
+if [[ "${SOURCE_MODE}" == "pico" && "${COMPONENT}" != "bridge" && -z "${REFERENCE_HOST}" ]]; then
   echo "REFERENCE_HOST is required; set it to the external pico host IP" >&2
   exit 2
+fi
+if [[ "${SOURCE_MODE}" == "motion" ]]; then
+  if [[ ! -d "${MOTION_ROOT}" ]]; then
+    echo "Onboard motion root not found: ${MOTION_ROOT}" >&2
+    exit 1
+  fi
+  MOTION_ROOT="$(realpath "${MOTION_ROOT}")"
 fi
 
 run_bridge() {
@@ -119,6 +141,10 @@ run_policy() {
     "G1_REF_REQ_PORT=${VR_REQ_PORT}"
     "G1_REF_POSE_PORT=${VR_POSE_PORT}"
     "G1_REF_CTRL_PORT=${VR_CTRL_PORT}"
+    "G1_MOTION_SOURCE=${SOURCE_MODE}"
+    "G1_MOTION_ROOT=${MOTION_ROOT}"
+    "G1_MOTION_SELECT_HOST=${MOTION_SELECT_HOST}"
+    "G1_MOTION_SELECT_PORT=${MOTION_SELECT_PORT}"
     "G1_STATE_PORT=${STATE_PORT}"
     "G1_CMD_PORT=${CMD_PORT}"
   )
@@ -129,10 +155,25 @@ run_policy() {
   exec "${command[@]}"
 }
 
+run_motion_select() {
+  if [[ "${SOURCE_MODE}" != "motion" ]]; then
+    echo "motion-select is available only with --source motion" >&2
+    exit 2
+  fi
+  cd "${REPO_ROOT}/sim2real"
+  exec env \
+    G1_MOTION_ROOT="${MOTION_ROOT}" \
+    G1_MOTION_SELECT_HOST="${MOTION_SELECT_HOST}" \
+    G1_MOTION_SELECT_PORT="${MOTION_SELECT_PORT}" \
+    uv run src/motion_select.py
+}
+
 if [[ "${COMPONENT}" == "bridge" ]]; then
   run_bridge
 elif [[ "${COMPONENT}" == "policy" ]]; then
   run_policy
+elif [[ "${COMPONENT}" == "motion-select" ]]; then
+  run_motion_select
 fi
 
 if ! command -v tmux >/dev/null 2>&1; then
@@ -167,19 +208,32 @@ if tmux has-session -t "${SESSION}" 2>/dev/null; then
 fi
 
 printf -v common_env \
-  'REFERENCE_HOST=%q VR_REQ_PORT=%q VR_POSE_PORT=%q VR_CTRL_PORT=%q STATE_PORT=%q CMD_PORT=%q G1_DDS_IFACE=%q G1_BRIDGE_BUILD_DIR=%q BRIDGE_CPU_SET=%q POLICY_CPU_SET=%q' \
+  'SOURCE_MODE=%q REFERENCE_HOST=%q VR_REQ_PORT=%q VR_POSE_PORT=%q VR_CTRL_PORT=%q MOTION_ROOT=%q MOTION_SELECT_HOST=%q MOTION_SELECT_PORT=%q STATE_PORT=%q CMD_PORT=%q G1_DDS_IFACE=%q G1_BRIDGE_BUILD_DIR=%q BRIDGE_CPU_SET=%q POLICY_CPU_SET=%q' \
+  "${SOURCE_MODE}" \
   "${REFERENCE_HOST}" "${VR_REQ_PORT}" "${VR_POSE_PORT}" "${VR_CTRL_PORT}" \
+  "${MOTION_ROOT}" "${MOTION_SELECT_HOST}" "${MOTION_SELECT_PORT}" \
   "${STATE_PORT}" "${CMD_PORT}" "${G1_DDS_IFACE}" "${G1_BRIDGE_BUILD_DIR}" \
   "${BRIDGE_CPU_SET}" "${POLICY_CPU_SET}"
 printf -v script_path '%q' "${SCRIPT_DIR}/launch_deploy.sh"
 
 tmux new-session -d -s "${SESSION}" -n bridge
 tmux new-window -t "${SESSION}" -n policy
+if [[ "${SOURCE_MODE}" == "motion" ]]; then
+  tmux new-window -t "${SESSION}" -n motion-select
+fi
 tmux set-option -t "${SESSION}" mouse on
 tmux send-keys -t "${SESSION}:bridge" "${common_env} bash ${script_path} --${TARGET} --component bridge" C-m
 tmux send-keys -t "${SESSION}:policy" "${common_env} bash ${script_path} --${TARGET} --component policy" C-m
+if [[ "${SOURCE_MODE}" == "motion" ]]; then
+  tmux send-keys -t "${SESSION}:motion-select" "${common_env} bash ${script_path} --${TARGET} --component motion-select" C-m
+  tmux select-window -t "${SESSION}:motion-select"
+fi
 
-echo "Deploy session started: ${SESSION} (bridge, policy)"
+if [[ "${SOURCE_MODE}" == "motion" ]]; then
+  echo "Deploy session started: ${SESSION} (bridge, policy, motion-select; onboard motion mode)"
+else
+  echo "Deploy session started: ${SESSION} (bridge, policy; pico/wireless mode)"
+fi
 echo "Stop it: SESSION=${SESSION} bash scripts/launch_deploy.sh --stop"
 if ! "${DETACH}"; then
   exec tmux attach -t "${SESSION}"

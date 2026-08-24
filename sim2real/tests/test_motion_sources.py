@@ -19,7 +19,9 @@ from common.utils import DictToClass
 from runtime.motion_sources import (
     ISAACLAB_G1_JOINT_NAMES,
     MotionSourceBase,
+    UDPMotionSource,
     VRMotionSource,
+    discover_motion_files,
 )
 from runtime.policy import _load_policy_metadata
 
@@ -139,6 +141,97 @@ class MotionSourceFormatTests(unittest.TestCase):
             np.testing.assert_array_equal(loaded["joint_pos"], joint_pos)
             self.assertEqual(loaded["joint_pos"].shape[0], 2)
             np.testing.assert_array_equal(loaded["root_quat"][0], [1.0, 0.0, 0.0, 0.0])
+
+
+class OnboardMotionSourceTests(unittest.TestCase):
+    def test_local_motion_is_discovered_and_loaded_only_when_selected(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "motion"
+            path = root / "nested" / "local.npz"
+            path.parent.mkdir(parents=True)
+            frames = 2
+            joint_pos = np.stack(
+                [np.arange(29, dtype=np.float32) + 100.0 * frame for frame in range(frames)]
+            )
+            body_pos_w = np.zeros((frames, 1, 3), dtype=np.float32)
+            body_pos_w[:, 0, 2] = 0.76
+            body_quat_w = np.zeros((frames, 1, 4), dtype=np.float32)
+            body_quat_w[..., 0] = 1.0
+            np.savez(
+                path,
+                joint_pos=joint_pos,
+                body_pos_w=body_pos_w,
+                body_quat_w=body_quat_w,
+                fps=np.asarray([50], dtype=np.int32),
+            )
+
+            self.assertEqual(discover_motion_files(root), {"nested/local": path.resolve()})
+
+            config = DictToClass(
+                {
+                    "_config_dir": tmp_dir,
+                    "motion_type": "isaaclab",
+                    "root_body_index": 0,
+                    "motion_source": {
+                        "type": "udp",
+                        "udp": {
+                            "enable": False,
+                            "host": "127.0.0.1",
+                            "port": 28562,
+                            "motion_root": str(root),
+                        },
+                    },
+                    "motion_clips": [
+                        {
+                            "name": "default",
+                            "joint_pos": [0.0] * 29,
+                            "root_quat": [1.0, 0.0, 0.0, 0.0],
+                            "root_pos": [0.0, 0.0, 0.76],
+                        }
+                    ],
+                }
+            )
+            policy = SimpleNamespace(
+                dataset_joint_names=list(MUJOCO_G1_JOINT_NAMES),
+                obs_joint_names=list(MUJOCO_G1_JOINT_NAMES),
+                current_name="default",
+                current_done=True,
+            )
+            source = UDPMotionSource(policy, config)
+
+            self.assertNotIn("nested/local", source.motions)
+            captured = []
+
+            def append_loaded(name):
+                captured.append(source.motions[name]["joint_pos"].copy())
+                return True
+
+            source.append_motion_from_tail = append_loaded
+            self.assertTrue(source.request_motion("nested/local"))
+            self.assertNotIn("nested/local", source.motions)
+            expected_indices = [
+                ISAACLAB_G1_JOINT_NAMES.index(name) for name in MUJOCO_G1_JOINT_NAMES
+            ]
+            np.testing.assert_array_equal(captured[0][1], joint_pos[1, expected_indices])
+
+    def test_queued_local_motion_waits_for_automatic_default_return(self):
+        source = object.__new__(UDPMotionSource)
+        source.motion_root = Path("/motion")
+        source.policy = SimpleNamespace(current_name="first", current_done=True)
+        source._pending_local_motion = "second"
+        calls = []
+        source.append_motion_from_tail = lambda name: calls.append(("append", name)) or True
+        source.request_motion = lambda name: calls.append(("play", name)) or True
+
+        source._advance_local_motion_queue()
+        self.assertEqual(calls, [("append", "default")])
+        self.assertEqual(source._pending_local_motion, "second")
+
+        source.policy.current_name = "default"
+        source.policy.current_done = True
+        source._advance_local_motion_queue()
+        self.assertEqual(calls[-1], ("play", "second"))
+        self.assertIsNone(source._pending_local_motion)
 
 
 class PolicyMetadataFallbackTests(unittest.TestCase):

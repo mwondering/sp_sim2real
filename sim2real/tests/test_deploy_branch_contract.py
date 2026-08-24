@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import yaml
@@ -17,6 +19,8 @@ if str(SRC_ROOT) not in sys.path:
 
 from paths import SUPPORTED_ROBOTS
 from common.udp_transport import UDPRobotHighConfig, UDPRobotLowConfig
+from common.utils import DictToClass
+from deploy import configure_motion_source
 from runtime.motion_sources import reference_endpoint_from_env
 
 
@@ -84,6 +88,31 @@ class DeployBranchContractTests(unittest.TestCase):
                 ),
                 "tcp://server-name:30701",
             )
+
+    def test_onboard_motion_override_is_explicit_and_additive(self):
+        tracking = DictToClass({"motion_source": {"type": "vr", "vr": {}}})
+        configure_motion_source(tracking, SimpleNamespace(motion_source="config"))
+        self.assertEqual(tracking.motion_source, {"type": "vr", "vr": {}})
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            args = SimpleNamespace(
+                motion_source="motion",
+                motion_root=Path(tmp_dir),
+                motion_select_host="127.0.0.1",
+                motion_select_port=28562,
+            )
+            configure_motion_source(tracking, args)
+
+        self.assertEqual(tracking.motion_source["type"], "udp")
+        self.assertEqual(
+            tracking.motion_source["udp"],
+            {
+                "enable": True,
+                "host": "127.0.0.1",
+                "port": 28562,
+                "motion_root": str(Path(tmp_dir).resolve()),
+            },
+        )
 
     def test_robot_udp_environment_override(self):
         config = {
