@@ -33,12 +33,12 @@ case "${SOURCE_MODE}" in
       "$@"
     ;;
   motion)
-    if [[ -z "${MOTION_FILE:-}" ]]; then
-      echo "SOURCE_MODE=motion requires MOTION_FILE=/path/to/motion.npz" >&2
-      exit 2
+    MOTION_ARGS=()
+    if [[ -n "${MOTION_FILE:-}" ]]; then
+      MOTION_ARGS+=("${MOTION_FILE}")
     fi
     exec uv run python teleop/serve_motion_reference.py \
-      "${MOTION_FILE}" \
+      "${MOTION_ARGS[@]}" \
       --config config/g1/retarget/teleop.yaml \
       --motion-root "${MOTION_ROOT}" \
       --select-bind-addr "tcp://${MOTION_SELECT_BIND_IP}:${MOTION_SELECT_PORT}" \

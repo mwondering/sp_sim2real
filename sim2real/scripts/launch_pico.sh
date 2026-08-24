@@ -30,12 +30,12 @@ usage() {
   cat <<'EOF'
 Usage:
   bash scripts/launch_pico.sh --source pico
-  bash scripts/launch_pico.sh --source motion --motion-file /path/to/motion.npz
+  bash scripts/launch_pico.sh --source motion
   bash scripts/launch_pico.sh --source raw-replay --motion-file /path/to/raw.npz
 
 Options:
   --source pico|motion|raw-replay
-  --motion-file PATH
+  --motion-file PATH   Optional initial selection for motion; required for raw-replay
   --detach
   --replace
   --stop
@@ -79,7 +79,7 @@ case "${SOURCE_MODE}" in
   pico|motion|raw-replay) ;;
   *) echo "Invalid SOURCE_MODE=${SOURCE_MODE}" >&2; exit 2 ;;
 esac
-if [[ "${SOURCE_MODE}" != "pico" ]]; then
+if [[ "${SOURCE_MODE}" == "raw-replay" ]]; then
   if [[ -z "${MOTION_FILE}" ]]; then
     echo "${SOURCE_MODE} requires --motion-file PATH" >&2
     exit 2
@@ -89,12 +89,18 @@ if [[ "${SOURCE_MODE}" != "pico" ]]; then
     exit 1
   fi
   MOTION_FILE="$(realpath "${MOTION_FILE}")"
-  if [[ "${SOURCE_MODE}" == "motion" ]]; then
-    if [[ ! -d "${MOTION_ROOT}" ]]; then
-      echo "Motion root not found: ${MOTION_ROOT}" >&2
+elif [[ "${SOURCE_MODE}" == "motion" ]]; then
+  if [[ ! -d "${MOTION_ROOT}" ]]; then
+    echo "Motion root not found: ${MOTION_ROOT}" >&2
+    exit 1
+  fi
+  MOTION_ROOT="$(realpath "${MOTION_ROOT}")"
+  if [[ -n "${MOTION_FILE}" ]]; then
+    if [[ ! -f "${MOTION_FILE}" ]]; then
+      echo "Motion file not found: ${MOTION_FILE}" >&2
       exit 1
     fi
-    MOTION_ROOT="$(realpath "${MOTION_ROOT}")"
+    MOTION_FILE="$(realpath "${MOTION_FILE}")"
   fi
 elif [[ ! -f "${XR_SERVICE_DIR}/runService.sh" ]]; then
   echo "XR service launcher not found: ${XR_SERVICE_DIR}/runService.sh" >&2

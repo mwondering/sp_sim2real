@@ -34,19 +34,22 @@ SERVER_IP=192.168.31.20 \
 REFERENCE_BIND_IP=0.0.0.0 \
 VR_REQ_PORT=28701 VR_POSE_PORT=28702 VR_CTRL_PORT=28703 \
 MOTION_SELECT_PORT=28704 VIEWER_PORT=8080 \
-bash scripts/launch_pico.sh --source motion \
-  --motion-file "$PWD/config/g1/motions/omni_extreme/omni_extreme_1.npz"
+bash scripts/launch_pico.sh --source motion
 ```
 
-启动参数指定第一条 motion；`motion-select` 窗口会列出所有 G1 motion，之后可输入编号、
-完整名称或唯一子串选择。每条 motion 只播放一次，操作顺序如下：
+启动时会自动扫描仓库的 `sim2real/config/g1/motions`，无需手动指定路径。`motion-select`
+窗口会列出所有 G1 motion，可输入编号、完整名称或唯一子串选择。每条 motion 只播放一次，
+操作顺序如下：
 
-1. G1 在默认位姿时，按遥控器 `A` 开始所选 motion；
-2. 播放完成后，按遥控器方向键 `Up` 回到默认位姿；
-3. 在 `motion-select` 选择下一条 motion，再按 `A`。
+1. 机载 deploy 启动后，在 G1 默认位姿按一次遥控器 `A`，进入并保持策略控制；
+2. 在 `motion-select` 选择 motion，机载策略就绪后会自动执行；
+3. 播放完成后，策略自动平滑过渡到默认 reference 并继续保持控制；
+4. 继续选择下一条 motion，策略会在默认过渡完成后自动执行。
 
-播放过程中或尚未返回默认位姿时，选择器会拒绝切换。`MOTION_SELECT_PORT` 默认是
-`28704`，仅绑定外部主机的 `127.0.0.1`，不需要向 G1 开放。
+不需要反复按 `A`，也不需要按 `Up`。播放过程中会拒绝替换当前 motion；播放结束后可立即
+选择下一条，机载端会先完成默认位姿过渡，再自动启动队列中的 motion。`MOTION_SELECT_PORT`
+默认是 `28704`，仅绑定外部主机的 `127.0.0.1`，不需要向 G1 开放。若 motion 不在仓库默认
+目录，可通过 `MOTION_ROOT=/path/to/motions` 覆盖扫描路径。
 
 原始 PICO 录制回放：
 

@@ -64,5 +64,7 @@ uv run python teleop/serve_xrobot_teleop.py \
 正常使用建议执行上层 `scripts/launch_pico.sh`，它会同时管理 PC Service 和 reference
 server。策略推理和机器人控制不在本分支中运行。
 
-motion 模式下，launcher 会用 `28704` 本地端口启动 `motion_select.py`。motion 单次播放；
-完成后在 G1 遥控器按 `Up` 返回默认位姿，选择下一条 motion 后按 `A` 再次开始。
+motion 模式会自动扫描 `config/g1/motions`，不需要在启动时指定文件；launcher 会用
+`28704` 本地端口启动 `motion_select.py`。机载 deploy 启动后只需按一次 `A` 进入策略控制。
+此后每次选择都会在策略就绪后自动执行；motion 结束后，策略自动过渡到默认 reference 并
+保持控制，等待下一次选择。

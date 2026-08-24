@@ -95,9 +95,9 @@ class PicoBranchContractTests(unittest.TestCase):
         self.assertTrue(np.isfinite(qpos).all())
         self.assertGreater(fps, 0.0)
 
-    def test_motion_server_plays_once_and_requires_default_before_switch(self):
+    def test_motion_server_auto_discovers_and_queues_repeated_selections(self):
         motion_root = SIM2REAL_ROOT / "config/g1/motions"
-        first = motion_root / "omni_extreme/omni_extreme_1.npz"
+        first_name = "omni_extreme/omni_extreme_1"
         second_name = "omni_extreme/omni_extreme_2"
         server = MotionReferenceServer(
             SimpleNamespace(
@@ -106,7 +106,7 @@ class PicoBranchContractTests(unittest.TestCase):
                 rep_bind_addr=None,
                 ctrl_bind_addr=None,
                 motion_root=motion_root,
-                motion=first,
+                motion=None,
                 loop=False,
                 no_viewer=True,
                 viewer_host="127.0.0.1",
@@ -115,25 +115,33 @@ class PicoBranchContractTests(unittest.TestCase):
             )
         )
 
+        self.assertEqual(server.state, "waiting")
+        self.assertIsNone(server.qpos)
+        self.assertEqual(len(server.motion_files), 17)
+
+        first = server.handle_selection_request(
+            {"command": "select", "motion": first_name}
+        )
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["motion"], first_name)
+        self.assertEqual(first["motion_command_seq"], 1)
+        self.assertEqual(server.state, "queued")
+
         _, finished = server._next_frame(start=True)
         self.assertFalse(finished)
+        assert server.qpos is not None
         for _ in range(server.qpos.shape[0] - 1):
             _, finished = server._next_frame(start=False)
         self.assertTrue(finished)
         self.assertEqual(server.state, "finished")
 
-        rejected = server.handle_selection_request(
-            {"command": "select", "motion": second_name}
-        )
-        self.assertFalse(rejected["ok"])
-
-        server.mark_default()
         accepted = server.handle_selection_request(
             {"command": "select", "motion": second_name}
         )
         self.assertTrue(accepted["ok"])
         self.assertEqual(accepted["motion"], second_name)
-        self.assertEqual(server.state, "ready")
+        self.assertEqual(accepted["motion_command_seq"], 2)
+        self.assertEqual(server.state, "queued")
 
     def test_g1_retarget_runtime_initializes_without_policy_runtime(self):
         config = load_teleop_robot_config("g1")

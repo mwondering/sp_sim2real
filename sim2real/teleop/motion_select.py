@@ -25,8 +25,9 @@ Motion Selector
   - 'q'      : quit this selector
 
 Workflow on G1:
-  A starts the selected motion. After it finishes, Up returns the robot to the
-  default pose. Select another motion here, then press A again.
+  Press A once after starting the onboard deploy process to enter policy control.
+  Each selection then starts automatically when the policy is at its default
+  reference. After a motion finishes, the policy returns to default and waits.
 """
 
 

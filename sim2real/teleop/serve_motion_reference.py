@@ -129,15 +129,24 @@ class MotionReferenceServer:
             ctrl_bind_addr=args.ctrl_bind_addr or config.ctrl_bind_addr,
         )
         self.motion_root = args.motion_root.expanduser().resolve()
-        self.motion_path = resolve_motion_choice(str(args.motion), self.motion_root)
-        self.motion_name = motion_display_name(self.motion_path, self.motion_root)
-        self.qpos, self.fps = load_motion(self.motion_path, self.config.dof_names)
+        self.motion_files = discover_motion_files(self.motion_root)
+        if not self.motion_files:
+            raise RuntimeError(f"no .npz motions found under {self.motion_root}")
+        self.motion_path: Path | None = None
+        self.motion_name = ""
+        self.qpos: np.ndarray | None = None
+        self.fps = 0.0
         self.index = 0
         self.sequence = 0
+        self.motion_command_seq = 0
         self.loop = bool(args.loop)
+        self.queued = False
         self.playing = False
         self.finished = False
-        self.at_default = True
+        if args.motion is not None:
+            self._load_selected_motion(str(args.motion))
+            self.motion_command_seq = 1
+            self.queued = True
         self.stop_event = threading.Event()
         self.viewer = None if args.no_viewer else MJViserViewer(
             "g1", host=args.viewer_host, port=args.viewer_port
@@ -152,11 +161,11 @@ class MotionReferenceServer:
     def state(self) -> str:
         if self.playing:
             return "playing"
+        if self.queued:
+            return "queued"
         if self.finished:
             return "finished"
-        if self.at_default:
-            return "ready"
-        return "idle"
+        return "waiting"
 
     def _status_payload(self) -> dict[str, Any]:
         return {
@@ -164,23 +173,29 @@ class MotionReferenceServer:
             "ok": True,
             "state": self.state,
             "motion": self.motion_name,
-            "frames": int(self.qpos.shape[0]),
+            "motion_command_seq": int(self.motion_command_seq),
+            "frames": 0 if self.qpos is None else int(self.qpos.shape[0]),
             "fps": float(self.fps),
         }
 
+    def _load_selected_motion(self, choice: str) -> None:
+        path = resolve_motion_choice(choice, self.motion_root)
+        qpos, fps = load_motion(path, self.config.dof_names)
+        self.motion_path = path
+        self.motion_name = motion_display_name(path, self.motion_root)
+        self.qpos = qpos
+        self.fps = fps
+        self.index = 0
+
     def _select_motion(self, choice: str) -> dict[str, Any]:
-        if self.playing or not self.at_default:
+        if self.playing:
             return {
                 **self._status_payload(),
                 "ok": False,
-                "detail": (
-                    "motion switch rejected; wait for playback to finish, then press "
-                    "G1 remote Up to return to the default pose"
-                ),
+                "detail": "motion switch rejected while the current motion is playing",
             }
         try:
-            path = resolve_motion_choice(choice, self.motion_root)
-            qpos, fps = load_motion(path, self.config.dof_names)
+            self._load_selected_motion(choice)
         except (FileNotFoundError, OSError, ValueError) as exc:
             return {
                 **self._status_payload(),
@@ -188,21 +203,17 @@ class MotionReferenceServer:
                 "detail": str(exc),
             }
 
-        self.motion_path = path
-        self.motion_name = motion_display_name(path, self.motion_root)
-        self.qpos = qpos
-        self.fps = fps
-        self.index = 0
+        self.motion_command_seq += 1
+        self.queued = True
         self.playing = False
         self.finished = False
-        self.at_default = True
         print(
-            f"[MotionReference] selected '{self.motion_name}' "
+            f"[MotionReference] queued '{self.motion_name}' "
             f"frames={self.qpos.shape[0]} fps={self.fps:.3f}"
         )
         return {
             **self._status_payload(),
-            "detail": "selected; press G1 remote A to start tracking",
+            "detail": "queued; it will start automatically when the onboard policy is ready",
         }
 
     def handle_selection_request(self, payload: Any) -> dict[str, Any]:
@@ -238,22 +249,10 @@ class MotionReferenceServer:
             "detail": f"unknown selection command: {command!r}",
         }
 
-    def mark_default(self) -> None:
-        self.index = 0
-        self.playing = False
-        self.finished = False
-        self.at_default = True
-        print(
-            f"[MotionReference] G1 returned to default; '{self.motion_name}' is ready"
-        )
-
     def _control_loop(self) -> None:
         import zmq
 
         buttons = default_controller_buttons()
-        # A sustained right-primary signal makes every new deploy policy session
-        # produce one clean rising edge after VRMotionSource resets its state.
-        buttons["right_key_one"] = True
         payload = {
             "protocol": PROTOCOL,
             "source": "motion",
@@ -264,6 +263,7 @@ class MotionReferenceServer:
             payload["t_ms"] = int(time.time() * 1000)
             payload["motion"] = self.motion_name
             payload["state"] = self.state
+            payload["motion_command_seq"] = int(self.motion_command_seq)
             try:
                 self.ctrl_sock.send_string(json.dumps(payload), flags=zmq.NOBLOCK)
             except zmq.Again:
@@ -273,11 +273,13 @@ class MotionReferenceServer:
     def _next_frame(self, *, start: bool) -> tuple[np.ndarray, bool]:
         if start:
             self.index = 0
+            self.queued = False
             self.playing = True
             self.finished = False
-            self.at_default = False
             print(f"[MotionReference] playing '{self.motion_name}'")
 
+        if self.qpos is None:
+            raise RuntimeError("no motion is selected")
         frame = self.qpos[self.index]
         is_last = self.index + 1 >= self.qpos.shape[0]
         if not self.playing:
@@ -291,18 +293,21 @@ class MotionReferenceServer:
             self.finished = True
             print(
                 f"[MotionReference] finished '{self.motion_name}'; "
-                "press G1 remote Up to return to default"
+                "onboard policy will return to default and wait for the next selection"
             )
         return frame, self.finished
 
     def _handle_reference_request(self, req: Any) -> tuple[np.ndarray, dict[str, Any]] | None:
         if not isinstance(req, dict):
             return None
-        if str(req.get("command", "")).strip().lower() == "default":
-            self.mark_default()
+        if self.qpos is None:
             return None
 
         start = bool(req.get("start", False))
+        if start and not self.queued:
+            return None
+        if not start and not self.playing:
+            return None
         frame, finished = self._next_frame(start=start)
         qpos = np.ascontiguousarray(frame.reshape(1, -1), dtype=np.float32)
         header = {
@@ -339,8 +344,12 @@ class MotionReferenceServer:
         poller.register(self.select_sock, zmq.POLLIN)
 
         print("Motion reference server initialized")
-        print(f"  motion: {self.motion_name} ({self.motion_path})")
-        print(f"  frames/fps: {self.qpos.shape[0]}/{self.fps:.3f}")
+        print(f"  motion_root: {self.motion_root} ({len(self.motion_files)} files)")
+        if self.motion_path is None:
+            print("  motion: none selected; use the motion-select window")
+        else:
+            print(f"  motion: {self.motion_name} ({self.motion_path})")
+            print(f"  frames/fps: {self.qpos.shape[0]}/{self.fps:.3f}")
         print(f"  req/rep/ctrl: {self.config.req_bind_addr} {self.config.rep_bind_addr} {self.config.ctrl_bind_addr}")
         print(f"  selector: {self.args.select_bind_addr}")
         if self.viewer is not None:
@@ -391,7 +400,7 @@ class MotionReferenceServer:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("motion", type=Path)
+    parser.add_argument("motion", type=Path, nargs="?", default=None)
     parser.add_argument(
         "--motion-root",
         type=Path,
