@@ -2,7 +2,8 @@
 
 This branch contains only the SPV5-2 policy runtime for G1:
 
-- checkpoint: `ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.onnx`
+- default checkpoint: `ckpts/0904_ckpts_74000/policy.onnx`
+- additional checkpoint: `ckpts/0729_baoshou_waist_dataclean_changedr_nohandxml/policy_28000.onnx`
 - desktop MuJoCo sim2sim with visualization
 - G1 onboard policy inference and the C++ Unitree bridge
 - remote PICO/motion references supplied by the companion `pico` branch

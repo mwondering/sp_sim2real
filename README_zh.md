@@ -1,9 +1,15 @@
 # G1 SPV5-2 Deploy 分支
 
-本分支只保留 G1 SPV5-2 的 sim2sim 与 sim2real 部署。策略固定为：
+本分支只保留 G1 SPV5-2 的 sim2sim 与 sim2real 部署。默认策略为：
 
 ```text
-ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.onnx
+ckpts/0904_ckpts_74000/policy.onnx
+```
+
+同时保留原始的兼容策略及其 JSON 元数据，便于切换和对照测试：
+
+```text
+ckpts/0729_baoshou_waist_dataclean_changedr_nohandxml/policy_28000.onnx
 ```
 
 默认模式仍由配套的 `pico` 分支通过三路 ZMQ TCP 发送 reference。为了排查无线链路延迟，

@@ -1,6 +1,6 @@
 # Deployment profile for SP_Tracking SPV5-2 actors (8199-D input).
 # Keep the ONNX and its JSON sidecar together in this repository.
-policy_path: "../../../ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.onnx"
+policy_path: "../../../ckpts/0904_ckpts_74000/policy.onnx"
 actor_profile: "spv5_2"
 use_policy_metadata: true
 # Fallback for exporters whose sidecar omits the robot/action/PD contract.

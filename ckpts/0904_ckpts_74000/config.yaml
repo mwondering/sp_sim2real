@@ -1,0 +1,2192 @@
+agent:
+  experiment_name: g1_tracking
+  save_interval: 1000
+  num_steps_per_env: 24
+  max_iterations: 300000
+  seed: 42
+  logger: wandb
+  wandb_project: obs_ablation_bfm
+  run_name: SPTracking-G1-BFM-SPV5-2AActor-HEFTCritic-HEFTReward_8gpu_12288env_motion_data_correct
+  resume: false
+  load_run: .*
+  load_checkpoint: checkpoint_.*.pt
+  clip_actions: null
+  upload_model: false
+  actor:
+    hidden_dims:
+    - 2048
+    - 2048
+    - 1024
+    - 1024
+    - 512
+    - 256
+    - 128
+    activation: elu
+    obs_normalization: true
+    class_name: MLPModel
+    distribution_cfg:
+      class_name: GaussianDistribution
+      init_std: 1.0
+      std_type: scalar
+  critic:
+    hidden_dims:
+    - 2048
+    - 2048
+    - 1024
+    - 1024
+    - 512
+    - 256
+    - 128
+    activation: elu
+    obs_normalization: true
+    class_name: MLPModel
+    distribution_cfg: null
+  algorithm:
+    class_name: PPO
+    variant: ppo
+    sapg_cfg:
+      enabled: false
+      method: sapg
+      compatibility: official
+      num_policy_blocks: 4
+      local_parameter_dim: 32
+      off_policy_ratio: 1
+      exploration_type: none
+      entropy_coef_scale: 1.0
+      value_eval_chunk_size: 8192
+      cpo_awac_temperature: 0.2
+      cpo_awac_max_weight: 100.0
+      cpo_awac_coef: 0.001
+      cpo_kl_coef: 0.0
+    value_loss_coef: 1.0
+    use_clipped_value_loss: true
+    clip_param: 0.2
+    entropy_coef: 0.005
+    num_learning_epochs: 5
+    num_mini_batches: 4
+    learning_rate: 0.001
+    schedule: adaptive
+    gamma: 0.99
+    lam: 0.95
+    desired_kl: 0.01
+    max_grad_norm: 1.0
+task:
+  command:
+    command:
+      type: multi
+      entity_name: robot
+      motion_path: ''
+      motion_file: ''
+      motion_manifest_file: ''
+      motion_manifest_wait_timeout_s: 600.0
+      motion_manifest_poll_interval_s: 0.25
+      motion_scan_backend: fd
+      motion_scan_workers: 0
+      motion_scan_fd_executable: fdfind
+      motion_scan_log_interval_s: 10.0
+      excluded_motion_files: []
+      motion_exclude_files: '[/data_zcy/wxy/motion_filter/0827/invalid_motions_0827_v1.json,/data_zcy/wxy/SP_Tracking/logs/motion_benchmark_10000.json,/data_zcy/wxy/SP_Tracking/logs/motion_benchmark_0830_22000.json,/data_zcy/wxy/SP_Tracking/benchmark_0831_36000.json,/data_zcy/wxy/SP_Tracking/benchmark_0901_44000.json,/data_zcy/wxy/SP_Tracking/benchmark_0902_59000.json,/data_zcy/wxy/SP_Tracking/benchmark_0903_61000.json,/data_zcy/wxy/SP_Tracking/benchmark_0903_66000.json]'
+      motion_exclude_file: ''
+      extra_reference_motion_file: ''
+      motion_type: isaaclab
+      fk_from_joint_pos: false
+      recompute_joint_vel_from_joint_pos: false
+      reference_storage_mode: qpos_only_actor_fk
+      actor_reference_fps: 50.0
+      qpos_body_pose_cache_tile_steps: 16
+      qpos_body_pose_cache_range:
+      - -8
+      - 20
+      anchor_body_name: pelvis
+      body_names:
+      - pelvis
+      - left_hip_yaw_link
+      - left_knee_link
+      - left_ankle_roll_link
+      - right_hip_yaw_link
+      - right_knee_link
+      - right_ankle_roll_link
+      - torso_link
+      - left_shoulder_yaw_link
+      - left_wrist_roll_link
+      - left_wrist_yaw_link
+      - right_shoulder_yaw_link
+      - right_wrist_roll_link
+      - right_wrist_yaw_link
+      - left_hip_roll_link
+      - right_hip_roll_link
+      - left_shoulder_roll_link
+      - left_elbow_link
+      - right_shoulder_roll_link
+      - right_elbow_link
+      - left_wrist_pitch_link
+      - right_wrist_pitch_link
+      resampling_time_range:
+      - 1000000000.0
+      - 1000000000.0
+      debug_vis: true
+      pose_range:
+        x:
+        - -0.05
+        - 0.05
+        'y':
+        - -0.05
+        - 0.05
+        z:
+        - -0.01
+        - 0.01
+        roll:
+        - -0.1
+        - 0.1
+        pitch:
+        - -0.1
+        - 0.1
+        yaw:
+        - -0.2
+        - 0.2
+      velocity_range:
+        x:
+        - -0.5
+        - 0.5
+        'y':
+        - -0.5
+        - 0.5
+        z:
+        - -0.2
+        - 0.2
+        roll:
+        - -0.52
+        - 0.52
+        pitch:
+        - -0.52
+        - 0.52
+        yaw:
+        - -0.78
+        - 0.78
+      joint_position_range:
+      - -0.1
+      - 0.1
+      future_steps: 1
+      history_steps: 0
+      reference_cache_enabled: true
+      reference_cache_steps:
+        joint_pos:
+        - -16
+        - -12
+        - -8
+        - -4
+        - -2
+        - -1
+        - 0
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 12
+        - 16
+        - 20
+        joint_vel:
+        - 0
+        - 1
+        - 2
+        - 3
+        - 4
+        body_pos_w:
+        - -16
+        - -12
+        - -8
+        - -4
+        - -2
+        - -1
+        - 0
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 12
+        - 16
+        - 20
+        body_quat_w:
+        - -16
+        - -12
+        - -8
+        - -4
+        - -2
+        - -1
+        - 0
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 12
+        - 16
+        - 20
+        body_lin_vel_w:
+        - -8
+        - -4
+        - -2
+        - -1
+        - 0
+        - 1
+        - 2
+        - 3
+        - 4
+        - 8
+        - 12
+        - 16
+        - 20
+        body_ang_vel_w:
+        - -8
+        - -4
+        - -2
+        - -1
+        - 0
+        - 1
+        - 2
+        - 3
+        - 4
+        - 8
+        - 12
+        - 16
+        - 20
+      adaptive_uniform_ratio: 0.1
+      adaptive_sampling:
+        strategy: branch
+        random_probability: 0.5
+        temperature: 0.25
+      adaptive_bin_width_s: 1.0
+      adaptive_bin_width_steps: null
+      adaptive_prior_visit_count: 1.0
+      adaptive_prior_failure_count: 0.0
+      adaptive_failure_rate_ema_iterations: 1000
+      adaptive_probability_max_over_mean: 200
+      adaptive_sequence_length_agnostic: false
+      adaptive_max_prob_per_bin: auto
+      adaptive_max_prob_per_motion: auto
+      adaptive_pre_failure_sample_window_steps: 100
+      adaptive_bin_snapshot_interval_iterations: 1
+      adaptive_bin_snapshot_dir: ''
+      sampling_mode: adaptive
+      if_log_metrics: true
+      collection_preforward_enabled: false
+      motion_origin_recenter: false
+      feet_standing_body_names:
+      - left_ankle_roll_link
+      - right_ankle_roll_link
+      feet_standing:
+        z_enter: 0.18
+        z_exit: 0.25
+        vxy_enter: 0.2
+        vxy_exit: 0.3
+        vz_enter: 0.15
+        vz_exit: 0.25
+      student_motion_randomization:
+        enable: true
+        root_pos_noise_std: 0.005
+        root_ori_noise_std: 0.02
+        joint_pos_noise_std: 0.01
+        joint_pos_bias_std:
+          .*(shoulder|elbow|wrist|waist).*: 0.0
+          .*(hip|knee|ankle).*: 0.1
+        root_pos_drift:
+          root_z_offset_range_m:
+          - -0.05
+          - 0.05
+          xy_speed_range:
+          - 0.0
+          - 0.2
+          xy_freq_range_hz:
+          - 0.25
+          - 1.0
+          z_amplitude_range_m:
+          - 0.0
+          - 0.025
+          z_freq_range_hz:
+          - 0.25
+          - 1.0
+        root_rot_drift:
+          amplitude_range_rad:
+          - 0.0
+          - 0.1
+          freq_range_hz:
+          - 0.25
+          - 1.0
+      rewind:
+        enabled: true
+        failure_probability: 0.3333333333333333
+        min_steps: 0
+        max_steps: 0
+  obs:
+    observations:
+      actor:
+        concatenate_terms: true
+        enable_corruption: true
+        terms:
+        - name: command
+          term: generated_commands
+          params:
+            command_name: motion
+        - name: motion_anchor_pos_b
+          term: motion_anchor_pos_b
+          params:
+            command_name: motion
+            anchor_body_name: pelvis
+          noise:
+          - -0.25
+          - 0.25
+        - name: motion_anchor_ori_b
+          term: motion_anchor_ori_b
+          params:
+            command_name: motion
+            anchor_body_name: pelvis
+          noise:
+          - -0.05
+          - 0.05
+        - name: body_pos
+          term: robot_body_pos_b
+          params:
+            command_name: motion
+            body_names:
+            - pelvis
+            - left_hip_roll_link
+            - left_knee_link
+            - left_ankle_roll_link
+            - right_hip_roll_link
+            - right_knee_link
+            - right_ankle_roll_link
+            - torso_link
+            - left_shoulder_roll_link
+            - left_elbow_link
+            - left_wrist_yaw_link
+            - right_shoulder_roll_link
+            - right_elbow_link
+            - right_wrist_yaw_link
+            anchor_body_name: pelvis
+          noise:
+          - -0.25
+          - 0.25
+        - name: body_ori
+          term: robot_body_ori_b
+          params:
+            command_name: motion
+            body_names:
+            - pelvis
+            - left_hip_roll_link
+            - left_knee_link
+            - left_ankle_roll_link
+            - right_hip_roll_link
+            - right_knee_link
+            - right_ankle_roll_link
+            - torso_link
+            - left_shoulder_roll_link
+            - left_elbow_link
+            - left_wrist_yaw_link
+            - right_shoulder_roll_link
+            - right_elbow_link
+            - right_wrist_yaw_link
+            anchor_body_name: pelvis
+          noise:
+          - -0.05
+          - 0.05
+        - name: base_lin_vel
+          term: builtin_sensor
+          params:
+            sensor_name: robot/imu_lin_vel
+          noise:
+          - -0.5
+          - 0.5
+        - name: base_ang_vel
+          term: builtin_sensor
+          params:
+            sensor_name: robot/imu_ang_vel
+          noise:
+          - -0.2
+          - 0.2
+        - name: joint_pos
+          term: joint_pos_rel
+          noise:
+          - -0.01
+          - 0.01
+        - name: joint_vel
+          term: joint_vel_rel
+          noise:
+          - -0.5
+          - 0.5
+        - name: actions
+          term: last_action
+        enabled: false
+      critic:
+        concatenate_terms: true
+        enable_corruption: false
+        terms:
+        - name: command
+          term: generated_commands
+          params:
+            command_name: motion
+        - name: motion_anchor_pos_b
+          term: motion_anchor_pos_b
+          params:
+            command_name: motion
+            anchor_body_name: pelvis
+        - name: motion_anchor_ori_b
+          term: motion_anchor_ori_b
+          params:
+            command_name: motion
+            anchor_body_name: pelvis
+        - name: body_pos
+          term: robot_body_pos_b
+          params:
+            command_name: motion
+            body_names:
+            - pelvis
+            - left_hip_roll_link
+            - left_knee_link
+            - left_ankle_roll_link
+            - right_hip_roll_link
+            - right_knee_link
+            - right_ankle_roll_link
+            - torso_link
+            - left_shoulder_roll_link
+            - left_elbow_link
+            - left_wrist_yaw_link
+            - right_shoulder_roll_link
+            - right_elbow_link
+            - right_wrist_yaw_link
+            anchor_body_name: pelvis
+        - name: body_ori
+          term: robot_body_ori_b
+          params:
+            command_name: motion
+            body_names:
+            - pelvis
+            - left_hip_roll_link
+            - left_knee_link
+            - left_ankle_roll_link
+            - right_hip_roll_link
+            - right_knee_link
+            - right_ankle_roll_link
+            - torso_link
+            - left_shoulder_roll_link
+            - left_elbow_link
+            - left_wrist_yaw_link
+            - right_shoulder_roll_link
+            - right_elbow_link
+            - right_wrist_yaw_link
+            anchor_body_name: pelvis
+        - name: base_lin_vel
+          term: builtin_sensor
+          params:
+            sensor_name: robot/imu_lin_vel
+        - name: base_ang_vel
+          term: builtin_sensor
+          params:
+            sensor_name: robot/imu_ang_vel
+        - name: joint_pos
+          term: joint_pos_rel
+        - name: joint_vel
+          term: joint_vel_rel
+        - name: actions
+          term: last_action
+        enabled: false
+      policy:
+        concatenate_terms: true
+        enable_corruption: true
+        terms:
+        - name: boot_indicator_state_obs
+          term: boot_indicator_state_obs
+          params:
+            command_name: motion
+        - name: command_obs
+          term: command_obs
+          params:
+            command_name: motion
+            horizon: student
+            noise_std: 0.1
+            root_body_name: pelvis
+        - name: target_joint_pos_obs
+          term: target_joint_pos_obs
+          params:
+            command_name: motion
+            horizon: student
+            noise_std: 0.01
+        - name: target_root_z_obs
+          term: target_root_z_obs
+          params:
+            command_name: motion
+            horizon: student
+            root_body_name: pelvis
+        - name: target_projected_gravity_b_obs
+          term: target_projected_gravity_b_obs
+          params:
+            command_name: motion
+            horizon: student
+            root_body_name: pelvis
+        - name: root_angvel_b_history
+          term: root_angvel_b_history
+          params:
+            history_steps:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+            - 8
+            - 12
+            - 16
+            - 20
+            noise_std: 0.2
+        - name: projected_gravity_history
+          term: projected_gravity_history
+          params:
+            history_steps:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+            - 8
+            - 12
+            - 16
+            - 20
+            noise_std: 0.01
+            bias_noise_std: 0.03
+        - name: joint_pos_history
+          term: joint_pos_history
+          params:
+            history_steps:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+            - 8
+            - 12
+            - 16
+            - 20
+            noise_std: 0.01
+        - name: joint_vel_history
+          term: joint_vel_history
+          params:
+            history_steps:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+            - 8
+            - 12
+            - 16
+            - 20
+            noise_std: 0.5
+        - name: prev_actions
+          term: prev_actions
+          params:
+            steps: 8
+        disabled_terms:
+        - boot_indicator_state_obs
+      priv:
+        concatenate_terms: true
+        enable_corruption: false
+        terms:
+        - name: target_joint_pos_obs
+          term: target_joint_pos_obs
+          params:
+            command_name: motion
+            horizon: teacher
+        - name: target_root_z_obs
+          term: target_root_z_obs
+          params:
+            command_name: motion
+            horizon: teacher
+            root_body_name: pelvis
+        - name: target_projected_gravity_b_obs
+          term: target_projected_gravity_b_obs
+          params:
+            command_name: motion
+            horizon: teacher
+            root_body_name: pelvis
+        - name: target_pos_b_obs
+          term: target_pos_b_obs
+          params:
+            command_name: motion
+            root_body_name: pelvis
+        - name: target_rot_b_obs
+          term: target_rot_b_obs
+          params:
+            command_name: motion
+            root_body_name: pelvis
+        - name: target_linvel_b_obs
+          term: target_linvel_b_obs
+          params:
+            command_name: motion
+            root_body_name: pelvis
+        - name: target_angvel_b_obs
+          term: target_angvel_b_obs
+          params:
+            command_name: motion
+            root_body_name: pelvis
+        - name: current_keypoint_pos_b_obs
+          term: current_keypoint_pos_b_obs
+          params:
+            command_name: motion
+            keypoint_specs:
+            - name: left_hip
+              body_name: left_hip_yaw_link
+            - name: left_knee
+              body_name: left_knee_link
+            - name: left_foot
+              body_name: left_ankle_roll_link
+            - name: right_hip
+              body_name: right_hip_yaw_link
+            - name: right_knee
+              body_name: right_knee_link
+            - name: right_foot
+              body_name: right_ankle_roll_link
+            - name: head
+              body_name: torso_link
+              local_pos:
+              - 0.01
+              - 0.0
+              - 0.41
+            - name: left_shoulder
+              body_name: left_shoulder_yaw_link
+            - name: left_wrist
+              body_name: left_wrist_roll_link
+            - name: left_hand
+              body_name: left_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: left_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+            - name: right_shoulder
+              body_name: right_shoulder_yaw_link
+            - name: right_wrist
+              body_name: right_wrist_roll_link
+            - name: right_hand
+              body_name: right_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: right_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+        - name: current_keypoint_rot_b_obs
+          term: current_keypoint_rot_b_obs
+          params:
+            command_name: motion
+            keypoint_specs:
+            - name: left_hip
+              body_name: left_hip_yaw_link
+            - name: left_knee
+              body_name: left_knee_link
+            - name: left_foot
+              body_name: left_ankle_roll_link
+            - name: right_hip
+              body_name: right_hip_yaw_link
+            - name: right_knee
+              body_name: right_knee_link
+            - name: right_foot
+              body_name: right_ankle_roll_link
+            - name: head
+              body_name: torso_link
+              local_pos:
+              - 0.01
+              - 0.0
+              - 0.41
+            - name: left_shoulder
+              body_name: left_shoulder_yaw_link
+            - name: left_wrist
+              body_name: left_wrist_roll_link
+            - name: left_hand
+              body_name: left_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: left_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+            - name: right_shoulder
+              body_name: right_shoulder_yaw_link
+            - name: right_wrist
+              body_name: right_wrist_roll_link
+            - name: right_hand
+              body_name: right_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: right_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+        - name: current_keypoint_linvel_b_obs
+          term: current_keypoint_linvel_b_obs
+          params:
+            command_name: motion
+            keypoint_specs:
+            - name: left_hip
+              body_name: left_hip_yaw_link
+            - name: left_knee
+              body_name: left_knee_link
+            - name: left_foot
+              body_name: left_ankle_roll_link
+            - name: right_hip
+              body_name: right_hip_yaw_link
+            - name: right_knee
+              body_name: right_knee_link
+            - name: right_foot
+              body_name: right_ankle_roll_link
+            - name: head
+              body_name: torso_link
+              local_pos:
+              - 0.01
+              - 0.0
+              - 0.41
+            - name: left_shoulder
+              body_name: left_shoulder_yaw_link
+            - name: left_wrist
+              body_name: left_wrist_roll_link
+            - name: left_hand
+              body_name: left_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: left_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+            - name: right_shoulder
+              body_name: right_shoulder_yaw_link
+            - name: right_wrist
+              body_name: right_wrist_roll_link
+            - name: right_hand
+              body_name: right_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: right_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+        - name: current_keypoint_angvel_b_obs
+          term: current_keypoint_angvel_b_obs
+          params:
+            command_name: motion
+            keypoint_specs:
+            - name: left_hip
+              body_name: left_hip_yaw_link
+            - name: left_knee
+              body_name: left_knee_link
+            - name: left_foot
+              body_name: left_ankle_roll_link
+            - name: right_hip
+              body_name: right_hip_yaw_link
+            - name: right_knee
+              body_name: right_knee_link
+            - name: right_foot
+              body_name: right_ankle_roll_link
+            - name: head
+              body_name: torso_link
+              local_pos:
+              - 0.01
+              - 0.0
+              - 0.41
+            - name: left_shoulder
+              body_name: left_shoulder_yaw_link
+            - name: left_wrist
+              body_name: left_wrist_roll_link
+            - name: left_hand
+              body_name: left_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: left_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+            - name: right_shoulder
+              body_name: right_shoulder_yaw_link
+            - name: right_wrist
+              body_name: right_wrist_roll_link
+            - name: right_hand
+              body_name: right_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: right_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+        - name: target_keypoints_pos_b_obs
+          term: target_keypoints_pos_b_obs
+          params:
+            command_name: motion
+            required_steps: 12
+            include_diff: true
+            root_body_name: pelvis
+            keypoint_specs:
+            - name: left_hip
+              body_name: left_hip_yaw_link
+            - name: left_knee
+              body_name: left_knee_link
+            - name: left_foot
+              body_name: left_ankle_roll_link
+            - name: right_hip
+              body_name: right_hip_yaw_link
+            - name: right_knee
+              body_name: right_knee_link
+            - name: right_foot
+              body_name: right_ankle_roll_link
+            - name: head
+              body_name: torso_link
+              local_pos:
+              - 0.01
+              - 0.0
+              - 0.41
+            - name: left_shoulder
+              body_name: left_shoulder_yaw_link
+            - name: left_wrist
+              body_name: left_wrist_roll_link
+            - name: left_hand
+              body_name: left_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: left_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+            - name: right_shoulder
+              body_name: right_shoulder_yaw_link
+            - name: right_wrist
+              body_name: right_wrist_roll_link
+            - name: right_hand
+              body_name: right_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: right_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+        - name: target_keypoints_rot_b_obs
+          term: target_keypoints_rot_b_obs
+          params:
+            command_name: motion
+            required_steps: 12
+            include_diff: true
+            root_body_name: pelvis
+            keypoint_specs:
+            - name: left_hip
+              body_name: left_hip_yaw_link
+            - name: left_knee
+              body_name: left_knee_link
+            - name: left_foot
+              body_name: left_ankle_roll_link
+            - name: right_hip
+              body_name: right_hip_yaw_link
+            - name: right_knee
+              body_name: right_knee_link
+            - name: right_foot
+              body_name: right_ankle_roll_link
+            - name: head
+              body_name: torso_link
+              local_pos:
+              - 0.01
+              - 0.0
+              - 0.41
+            - name: left_shoulder
+              body_name: left_shoulder_yaw_link
+            - name: left_wrist
+              body_name: left_wrist_roll_link
+            - name: left_hand
+              body_name: left_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: left_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+            - name: right_shoulder
+              body_name: right_shoulder_yaw_link
+            - name: right_wrist
+              body_name: right_wrist_roll_link
+            - name: right_hand
+              body_name: right_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: right_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+        - name: root_linvel_b_history
+          term: root_linvel_b_history
+          params:
+            history_steps:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+            - 5
+            - 6
+            - 7
+            - 8
+            noise_std: 0.0
+        - name: root_angvel_b_history
+          term: root_angvel_b_history
+          params:
+            history_steps:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+            - 5
+            - 6
+            - 7
+            - 8
+            noise_std: 0.0
+        - name: projected_gravity_history
+          term: projected_gravity_history
+          params:
+            history_steps:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+            - 5
+            - 6
+            - 7
+            - 8
+            noise_std: 0.0
+            bias_noise_std: 0.0
+        - name: joint_pos_history
+          term: joint_pos_history
+          params:
+            history_steps:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+            - 5
+            - 6
+            - 7
+            - 8
+            noise_std: 0.0
+        - name: joint_vel_history
+          term: joint_vel_history
+          params:
+            history_steps:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+            - 5
+            - 6
+            - 7
+            - 8
+            noise_std: 0.0
+        - name: applied_action
+          term: applied_action
+        - name: applied_torque
+          term: applied_torque
+        - name: body_z_termination_obs
+          term: body_z_termination_obs
+          params:
+            command_name: motion
+        - name: gravity_dir_termination_obs
+          term: gravity_dir_termination_obs
+          params:
+            command_name: motion
+        - name: feet_contact_state
+          term: feet_contact_state
+          params:
+            sensor_name: contact_forces
+        - name: target_feet_contact_state_obs
+          term: target_feet_contact_state_obs
+          params:
+            command_name: motion
+        disabled_terms:
+        - body_z_termination_obs
+        - gravity_dir_termination_obs
+      priv_critic:
+        concatenate_terms: true
+        enable_corruption: false
+        terms:
+        - name: domain_motor_params_implicit
+          term: domain_motor_params_implicit
+        - name: domain_perturb_body_materials
+          term: domain_perturb_body_materials
+        - name: domain_random_joint_offset
+          term: domain_random_joint_offset
+        - name: domain_perturb_gravity
+          term: domain_perturb_gravity
+        enabled: false
+      actor_core:
+        concatenate_terms: true
+        enable_corruption: true
+        terms:
+        - name: root_pos_command
+          term: spv2_root_pos_command
+          params:
+            command_name: motion
+            root_body_name: pelvis
+        - name: root_ori_command
+          term: spv2_root_ori_command
+          params:
+            command_name: motion
+            root_body_name: pelvis
+            noise_std: 0.1
+        - name: ref_root_height
+          term: spv2_ref_root_height
+          params:
+            command_name: motion
+            root_body_name: pelvis
+        - name: ref_root_lin_vel
+          term: spv2_ref_root_lin_vel
+          params:
+            command_name: motion
+            root_body_name: pelvis
+        - name: ref_joint_pos
+          term: spv2_ref_joint_pos
+          params:
+            command_name: motion
+        - name: ref_joint_vel
+          term: spv2_ref_joint_vel
+          params:
+            command_name: motion
+        - name: ref_projected_gravity
+          term: spv2_ref_projected_gravity
+          params:
+            command_name: motion
+            root_body_name: pelvis
+        - name: ref_base_ang_vel
+          term: spv2_ref_base_ang_vel
+          params:
+            command_name: motion
+            root_body_name: pelvis
+        - name: joint_pos_error
+          term: spv1_joint_pos_error
+          params:
+            command_name: motion
+            biased: true
+            noise_std: 0.01
+        - name: joint_vel_error
+          term: spv1_joint_vel_error
+          params:
+            command_name: motion
+            noise_std: 0.5
+        - name: projected_gravity_error
+          term: spv1_projected_gravity_error
+          params:
+            command_name: motion
+            root_body_name: pelvis
+            noise_std: 0.05
+        - name: base_ang_vel_error
+          term: spv1_base_ang_vel_error
+          params:
+            command_name: motion
+            root_body_name: pelvis
+            sensor_name: robot/imu_ang_vel
+            noise_std: 0.2
+        enabled: false
+      estimator_history:
+        concatenate_terms: true
+        enable_corruption: true
+        terms:
+        - name: joint_pos
+          term: spv1_joint_pos
+          params:
+            command_name: motion
+            biased: true
+            noise_std: 0.01
+          history_length: 50
+        - name: joint_vel
+          term: spv1_joint_vel
+          params:
+            command_name: motion
+            noise_std: 0.5
+          history_length: 50
+        - name: projected_gravity
+          term: spv1_projected_gravity
+          params:
+            command_name: motion
+            noise_std: 0.05
+          history_length: 50
+        - name: base_ang_vel
+          term: spv1_base_ang_vel
+          params:
+            command_name: motion
+            sensor_name: robot/imu_ang_vel
+            noise_std: 0.2
+          history_length: 50
+        - name: last_action
+          term: last_action
+          history_length: 50
+        - name: joint_torque
+          term: spv1_joint_torque
+          params:
+            sample_mode: latest
+          noise:
+          - -2.0
+          - 2.0
+          history_length: 50
+      estimator_target:
+        concatenate_terms: true
+        enable_corruption: false
+        terms:
+        - name: root_height
+          term: spv3_root_height_gt
+      robot_key_body:
+        concatenate_terms: true
+        enable_corruption: false
+        terms:
+        - name: current
+          term: spv5_2_robot_key_body_state
+          params:
+            command_name: motion
+            biased: true
+            joint_pos_noise_std: 0.01
+            joint_vel_noise_std: 0.5
+            gyro_sensor_name: robot/imu_ang_vel
+            gyro_noise_std: 0.2
+            keypoint_specs:
+            - name: left_hip
+              body_name: left_hip_yaw_link
+            - name: left_knee
+              body_name: left_knee_link
+            - name: left_foot
+              body_name: left_ankle_roll_link
+            - name: right_hip
+              body_name: right_hip_yaw_link
+            - name: right_knee
+              body_name: right_knee_link
+            - name: right_foot
+              body_name: right_ankle_roll_link
+            - name: head
+              body_name: torso_link
+              local_pos:
+              - 0.01
+              - 0.0
+              - 0.41
+            - name: left_shoulder
+              body_name: left_shoulder_yaw_link
+            - name: left_wrist
+              body_name: left_wrist_roll_link
+            - name: left_hand
+              body_name: left_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: left_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+            - name: right_shoulder
+              body_name: right_shoulder_yaw_link
+            - name: right_wrist
+              body_name: right_wrist_roll_link
+            - name: right_hand
+              body_name: right_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: right_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+      ref_key_body:
+        concatenate_terms: true
+        enable_corruption: false
+        terms:
+        - name: current
+          term: spv4_ref_key_body_state
+          params:
+            command_name: motion
+            root_body_name: pelvis
+            keypoint_specs:
+            - name: left_hip
+              body_name: left_hip_yaw_link
+            - name: left_knee
+              body_name: left_knee_link
+            - name: left_foot
+              body_name: left_ankle_roll_link
+            - name: right_hip
+              body_name: right_hip_yaw_link
+            - name: right_knee
+              body_name: right_knee_link
+            - name: right_foot
+              body_name: right_ankle_roll_link
+            - name: head
+              body_name: torso_link
+              local_pos:
+              - 0.01
+              - 0.0
+              - 0.41
+            - name: left_shoulder
+              body_name: left_shoulder_yaw_link
+            - name: left_wrist
+              body_name: left_wrist_roll_link
+            - name: left_hand
+              body_name: left_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: left_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+            - name: right_shoulder
+              body_name: right_shoulder_yaw_link
+            - name: right_wrist
+              body_name: right_wrist_roll_link
+            - name: right_hand
+              body_name: right_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: right_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+        enabled: false
+      key_body_error:
+        concatenate_terms: true
+        enable_corruption: false
+        terms:
+        - name: current
+          term: spv4_key_body_error
+          params:
+            command_name: motion
+            root_body_name: pelvis
+            keypoint_specs:
+            - name: left_hip
+              body_name: left_hip_yaw_link
+            - name: left_knee
+              body_name: left_knee_link
+            - name: left_foot
+              body_name: left_ankle_roll_link
+            - name: right_hip
+              body_name: right_hip_yaw_link
+            - name: right_knee
+              body_name: right_knee_link
+            - name: right_foot
+              body_name: right_ankle_roll_link
+            - name: head
+              body_name: torso_link
+              local_pos:
+              - 0.01
+              - 0.0
+              - 0.41
+            - name: left_shoulder
+              body_name: left_shoulder_yaw_link
+            - name: left_wrist
+              body_name: left_wrist_roll_link
+            - name: left_hand
+              body_name: left_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: left_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+            - name: right_shoulder
+              body_name: right_shoulder_yaw_link
+            - name: right_wrist
+              body_name: right_wrist_roll_link
+            - name: right_hand
+              body_name: right_wrist_yaw_link
+              local_pos:
+              - 0.116
+              - 0.0
+              - 0.0
+              correction_body_name: right_wrist_pitch_link
+              correction_local_pos:
+              - 0.005
+              - 0.0
+              - 0.0
+        enabled: false
+      robot_root_quat:
+        concatenate_terms: true
+        enable_corruption: false
+        terms:
+        - name: current
+          term: spv5_robot_root_quat
+          params:
+            command_name: motion
+            root_quat_noise_std: 0.1
+      reference_encoder_input:
+        concatenate_terms: true
+        enable_corruption: false
+        terms:
+        - name: noisy_qpos_window
+          term: spv5_reference_encoder_input
+          params:
+            command_name: motion
+            root_quat_noise_std: 0.1
+      reference_encoder_target:
+        concatenate_terms: true
+        enable_corruption: false
+        terms:
+        - name: clean_qpos_support
+          term: spv5_reference_encoder_target
+          params:
+            command_name: motion
+            root_quat_noise_std: 0.1
+      foot_contact_target:
+        concatenate_terms: true
+        enable_corruption: false
+        terms:
+        - name: feet_in_contact
+          term: feet_contact_binary_state
+          params:
+            sensor_name: contact_forces
+    semantic_keypoints:
+      heft:
+      - name: left_hip
+        body_name: left_hip_yaw_link
+      - name: left_knee
+        body_name: left_knee_link
+      - name: left_foot
+        body_name: left_ankle_roll_link
+      - name: right_hip
+        body_name: right_hip_yaw_link
+      - name: right_knee
+        body_name: right_knee_link
+      - name: right_foot
+        body_name: right_ankle_roll_link
+      - name: head
+        body_name: torso_link
+        local_pos:
+        - 0.01
+        - 0.0
+        - 0.41
+      - name: left_shoulder
+        body_name: left_shoulder_yaw_link
+      - name: left_wrist
+        body_name: left_wrist_roll_link
+      - name: left_hand
+        body_name: left_wrist_yaw_link
+        local_pos:
+        - 0.116
+        - 0.0
+        - 0.0
+        correction_body_name: left_wrist_pitch_link
+        correction_local_pos:
+        - 0.005
+        - 0.0
+        - 0.0
+      - name: right_shoulder
+        body_name: right_shoulder_yaw_link
+      - name: right_wrist
+        body_name: right_wrist_roll_link
+      - name: right_hand
+        body_name: right_wrist_yaw_link
+        local_pos:
+        - 0.116
+        - 0.0
+        - 0.0
+        correction_body_name: right_wrist_pitch_link
+        correction_local_pos:
+        - 0.005
+        - 0.0
+        - 0.0
+      feet_toes:
+      - name: left_toe
+        body_name: left_ankle_roll_link
+        local_pos:
+        - 0.1
+        - 0.0
+        - 0.0
+      - name: right_toe
+        body_name: right_ankle_roll_link
+        local_pos:
+        - 0.1
+        - 0.0
+        - 0.0
+  reward:
+    weight_overrides:
+      root_pos_tracking: 1.5
+    rewards:
+    - name: root_pos_tracking
+      term: root_pos_tracking
+      weight: 1.0
+      params:
+        command_name: motion
+        sigma:
+        - 0.3
+    - name: wrist_link_height_tracking
+      term: global_link_height_tracking
+      weight: 1.0
+      params:
+        command_name: motion
+        body_names:
+        - left_wrist_yaw_link
+        - right_wrist_yaw_link
+        sigma:
+        - 0.3
+    - name: feet_link_height_tracking
+      term: global_link_height_tracking
+      weight: 1.0
+      params:
+        command_name: motion
+        body_names:
+        - left_ankle_roll_link
+        - right_ankle_roll_link
+        sigma:
+        - 0.3
+    - name: root_rot_tracking
+      term: root_rot_tracking
+      weight: 1.0
+      params:
+        command_name: motion
+        sigma:
+        - 0.4
+    - name: root_vel_tracking
+      term: root_vel_tracking
+      weight: 1.0
+      params:
+        command_name: motion
+        sigma:
+        - 1.0
+    - name: root_ang_vel_tracking
+      term: root_ang_vel_tracking
+      weight: 1.0
+      params:
+        command_name: motion
+        sigma:
+        - 3.0
+    - name: keypoint_pos_tracking
+      term: keypoint_pos_tracking
+      weight: 2.0
+      params:
+        command_name: motion
+        sigma:
+        - 0.3
+        keypoint_specs:
+        - name: left_hip
+          body_name: left_hip_yaw_link
+        - name: left_knee
+          body_name: left_knee_link
+        - name: left_foot
+          body_name: left_ankle_roll_link
+        - name: right_hip
+          body_name: right_hip_yaw_link
+        - name: right_knee
+          body_name: right_knee_link
+        - name: right_foot
+          body_name: right_ankle_roll_link
+        - name: head
+          body_name: torso_link
+          local_pos:
+          - 0.01
+          - 0.0
+          - 0.41
+        - name: left_shoulder
+          body_name: left_shoulder_yaw_link
+        - name: left_wrist
+          body_name: left_wrist_roll_link
+        - name: left_hand
+          body_name: left_wrist_yaw_link
+          local_pos:
+          - 0.116
+          - 0.0
+          - 0.0
+          correction_body_name: left_wrist_pitch_link
+          correction_local_pos:
+          - 0.005
+          - 0.0
+          - 0.0
+        - name: right_shoulder
+          body_name: right_shoulder_yaw_link
+        - name: right_wrist
+          body_name: right_wrist_roll_link
+        - name: right_hand
+          body_name: right_wrist_yaw_link
+          local_pos:
+          - 0.116
+          - 0.0
+          - 0.0
+          correction_body_name: right_wrist_pitch_link
+          correction_local_pos:
+          - 0.005
+          - 0.0
+          - 0.0
+    - name: keypoint_vel_tracking
+      term: keypoint_vel_tracking
+      weight: 1.0
+      params:
+        command_name: motion
+        sigma:
+        - 1.0
+        keypoint_specs:
+        - name: left_hip
+          body_name: left_hip_yaw_link
+        - name: left_knee
+          body_name: left_knee_link
+        - name: left_foot
+          body_name: left_ankle_roll_link
+        - name: right_hip
+          body_name: right_hip_yaw_link
+        - name: right_knee
+          body_name: right_knee_link
+        - name: right_foot
+          body_name: right_ankle_roll_link
+        - name: head
+          body_name: torso_link
+          local_pos:
+          - 0.01
+          - 0.0
+          - 0.41
+        - name: left_shoulder
+          body_name: left_shoulder_yaw_link
+        - name: left_wrist
+          body_name: left_wrist_roll_link
+        - name: left_hand
+          body_name: left_wrist_yaw_link
+          local_pos:
+          - 0.116
+          - 0.0
+          - 0.0
+          correction_body_name: left_wrist_pitch_link
+          correction_local_pos:
+          - 0.005
+          - 0.0
+          - 0.0
+        - name: right_shoulder
+          body_name: right_shoulder_yaw_link
+        - name: right_wrist
+          body_name: right_wrist_roll_link
+        - name: right_hand
+          body_name: right_wrist_yaw_link
+          local_pos:
+          - 0.116
+          - 0.0
+          - 0.0
+          correction_body_name: right_wrist_pitch_link
+          correction_local_pos:
+          - 0.005
+          - 0.0
+          - 0.0
+    - name: keypoint_rot_tracking
+      term: keypoint_rot_tracking
+      weight: 2.0
+      params:
+        command_name: motion
+        sigma:
+        - 0.4
+        keypoint_specs:
+        - name: left_hip
+          body_name: left_hip_yaw_link
+        - name: left_knee
+          body_name: left_knee_link
+        - name: left_foot
+          body_name: left_ankle_roll_link
+        - name: right_hip
+          body_name: right_hip_yaw_link
+        - name: right_knee
+          body_name: right_knee_link
+        - name: right_foot
+          body_name: right_ankle_roll_link
+        - name: head
+          body_name: torso_link
+          local_pos:
+          - 0.01
+          - 0.0
+          - 0.41
+        - name: left_shoulder
+          body_name: left_shoulder_yaw_link
+        - name: left_wrist
+          body_name: left_wrist_roll_link
+        - name: left_hand
+          body_name: left_wrist_yaw_link
+          local_pos:
+          - 0.116
+          - 0.0
+          - 0.0
+          correction_body_name: left_wrist_pitch_link
+          correction_local_pos:
+          - 0.005
+          - 0.0
+          - 0.0
+        - name: right_shoulder
+          body_name: right_shoulder_yaw_link
+        - name: right_wrist
+          body_name: right_wrist_roll_link
+        - name: right_hand
+          body_name: right_wrist_yaw_link
+          local_pos:
+          - 0.116
+          - 0.0
+          - 0.0
+          correction_body_name: right_wrist_pitch_link
+          correction_local_pos:
+          - 0.005
+          - 0.0
+          - 0.0
+    - name: keypoint_angvel_tracking
+      term: keypoint_angvel_tracking
+      weight: 1.0
+      params:
+        command_name: motion
+        sigma:
+        - 3.0
+        keypoint_specs:
+        - name: left_hip
+          body_name: left_hip_yaw_link
+        - name: left_knee
+          body_name: left_knee_link
+        - name: left_foot
+          body_name: left_ankle_roll_link
+        - name: right_hip
+          body_name: right_hip_yaw_link
+        - name: right_knee
+          body_name: right_knee_link
+        - name: right_foot
+          body_name: right_ankle_roll_link
+        - name: head
+          body_name: torso_link
+          local_pos:
+          - 0.01
+          - 0.0
+          - 0.41
+        - name: left_shoulder
+          body_name: left_shoulder_yaw_link
+        - name: left_wrist
+          body_name: left_wrist_roll_link
+        - name: left_hand
+          body_name: left_wrist_yaw_link
+          local_pos:
+          - 0.116
+          - 0.0
+          - 0.0
+          correction_body_name: left_wrist_pitch_link
+          correction_local_pos:
+          - 0.005
+          - 0.0
+          - 0.0
+        - name: right_shoulder
+          body_name: right_shoulder_yaw_link
+        - name: right_wrist
+          body_name: right_wrist_roll_link
+        - name: right_hand
+          body_name: right_wrist_yaw_link
+          local_pos:
+          - 0.116
+          - 0.0
+          - 0.0
+          correction_body_name: right_wrist_pitch_link
+          correction_local_pos:
+          - 0.005
+          - 0.0
+          - 0.0
+    - name: joint_pos_tracking
+      term: joint_pos_tracking
+      weight: 1.0
+      params:
+        command_name: motion
+        sigma:
+        - 0.5
+    - name: joint_vel_tracking
+      term: joint_vel_tracking
+      weight: 0.5
+      params:
+        command_name: motion
+        sigma:
+        - 3.0
+    - name: survival
+      term: survival
+      weight: 3.0
+    - name: joint_vel_l2
+      term: joint_vel_l2
+      weight: 0.00025
+    - name: action_rate_l2
+      term: action_rate_l2_sp
+      weight: 0.2
+    - name: waist_action_rate_l2
+      term: joint_action_rate_l2
+      weight: -0.5
+      params:
+        action_name: joint_pos
+        asset_cfg:
+          entity_name: robot
+          joint_names:
+          - waist_yaw_joint
+          - waist_roll_joint
+          - waist_pitch_joint
+    - name: feet_air_time_ref
+      term: feet_air_time_ref
+      weight: 2.5
+      params:
+        command_name: motion
+        sensor_name: contact_forces
+        thres: 0.25
+    - name: feet_air_time_ref_dense
+      term: feet_air_time_ref_dense
+      weight: 1.0
+      params:
+        command_name: motion
+        sensor_name: contact_forces
+        toe_specs:
+        - name: left_toe
+          body_name: left_ankle_roll_link
+          local_pos:
+          - 0.1
+          - 0.0
+          - 0.0
+        - name: right_toe
+          body_name: right_ankle_roll_link
+          local_pos:
+          - 0.1
+          - 0.0
+          - 0.0
+        air_h_low: 0.035
+        air_h_high: 0.155
+        contact_h_low: 0.035
+        contact_h_high: 0.125
+    - name: joint_pos_limits
+      term: joint_pos_limits_sp
+      weight: 1.0
+      params:
+        joint_names: .*
+        soft_factor: 0.9
+    - name: joint_torque_limits
+      term: joint_torque_limits
+      weight: 0.01
+      params:
+        joint_names: .*
+        soft_factor: 0.75
+  name: tracking_bfm_spv5_2a_actor_heft_critic_heft_reward
+  variant:
+    environment_profile: bfm_runtime_semantic_keypoints
+    reference_profile: bfm_physical_heft_semantics
+    observation_profile: spv5_2a_qpos_only_actor_fk
+    reward_profile: heft_finetune_tracking_bfm
+    termination_profile: old_tracking
+    curriculum_profile: none
+    sampling_profile: bfm_multimotion
+    agent_profile: bfm_ppo
+  num_envs: 12288
+  episode_length_s: 10.0
+  decimation: 4
+  seed: 42
+  domain_randomization: true
+  robot:
+    name: g1
+    asset: tracking_bfm_mesh_arm_spv1_g1
+    entity_name: robot
+    anchor_body_name: pelvis
+    viewer_body_name: torso_link
+    self_collision_primary_pattern: pelvis
+    foot_geom_pattern: ^(left|right)_foot[1-7]_collision$
+    base_com_body_names:
+    - torso_link
+    termination_body_names:
+    - left_ankle_roll_link
+    - right_ankle_roll_link
+    - left_wrist_yaw_link
+    - right_wrist_yaw_link
+    body_names:
+    - pelvis
+    - left_hip_yaw_link
+    - left_knee_link
+    - left_ankle_roll_link
+    - right_hip_yaw_link
+    - right_knee_link
+    - right_ankle_roll_link
+    - torso_link
+    - left_shoulder_yaw_link
+    - left_wrist_roll_link
+    - left_wrist_yaw_link
+    - right_shoulder_yaw_link
+    - right_wrist_roll_link
+    - right_wrist_yaw_link
+    - left_hip_roll_link
+    - right_hip_roll_link
+    - left_shoulder_roll_link
+    - left_elbow_link
+    - right_shoulder_roll_link
+    - right_elbow_link
+    - left_wrist_pitch_link
+    - right_wrist_pitch_link
+    joint_name_order:
+    - left_hip_pitch_joint
+    - right_hip_pitch_joint
+    - waist_yaw_joint
+    - left_hip_roll_joint
+    - right_hip_roll_joint
+    - waist_roll_joint
+    - left_hip_yaw_joint
+    - right_hip_yaw_joint
+    - waist_pitch_joint
+    - left_knee_joint
+    - right_knee_joint
+    - left_shoulder_pitch_joint
+    - right_shoulder_pitch_joint
+    - left_ankle_pitch_joint
+    - right_ankle_pitch_joint
+    - left_shoulder_roll_joint
+    - right_shoulder_roll_joint
+    - left_ankle_roll_joint
+    - right_ankle_roll_joint
+    - left_shoulder_yaw_joint
+    - right_shoulder_yaw_joint
+    - left_elbow_joint
+    - right_elbow_joint
+    - left_wrist_roll_joint
+    - right_wrist_roll_joint
+    - left_wrist_pitch_joint
+    - right_wrist_pitch_joint
+    - left_wrist_yaw_joint
+    - right_wrist_yaw_joint
+  reference_views:
+    old_tracking:
+      anchor_body_name: pelvis
+      body_names:
+      - pelvis
+      - left_hip_roll_link
+      - left_knee_link
+      - left_ankle_roll_link
+      - right_hip_roll_link
+      - right_knee_link
+      - right_ankle_roll_link
+      - torso_link
+      - left_shoulder_roll_link
+      - left_elbow_link
+      - left_wrist_yaw_link
+      - right_shoulder_roll_link
+      - right_elbow_link
+      - right_wrist_yaw_link
+      termination_body_names:
+      - left_ankle_roll_link
+      - right_ankle_roll_link
+      - left_wrist_yaw_link
+      - right_wrist_yaw_link
+    sp_tracking:
+      anchor_body_name: pelvis
+      body_names:
+      - pelvis
+      - left_hip_yaw_link
+      - left_knee_link
+      - left_ankle_roll_link
+      - right_hip_yaw_link
+      - right_knee_link
+      - right_ankle_roll_link
+      - torso_link
+      - left_shoulder_yaw_link
+      - left_wrist_roll_link
+      - left_wrist_yaw_link
+      - right_shoulder_yaw_link
+      - right_wrist_roll_link
+      - right_wrist_yaw_link
+    combined:
+      body_names:
+      - pelvis
+      - left_hip_yaw_link
+      - left_knee_link
+      - left_ankle_roll_link
+      - right_hip_yaw_link
+      - right_knee_link
+      - right_ankle_roll_link
+      - torso_link
+      - left_shoulder_yaw_link
+      - left_wrist_roll_link
+      - left_wrist_yaw_link
+      - right_shoulder_yaw_link
+      - right_wrist_roll_link
+      - right_wrist_yaw_link
+      - left_hip_roll_link
+      - right_hip_roll_link
+      - left_shoulder_roll_link
+      - left_elbow_link
+      - right_shoulder_roll_link
+      - right_elbow_link
+      - left_wrist_pitch_link
+      - right_wrist_pitch_link
+  scene:
+    terrain_type: plane
+    env_spacing: 2.0
+  sim:
+    timestep: 0.005
+    iterations: 10
+    ls_iterations: 20
+    nconmax: 128
+    njmax: 512
+  viewer:
+    distance: 2.8
+    fovy: 55.0
+    elevation: -5.0
+    azimuth: 120.0
+  action:
+    scale: g1_action_scale
+    use_default_offset: true
+    actuator_names:
+    - .*
+    type: joint_position_with_mean_history
+    observation_history_steps: 8
+  events:
+    push_robot:
+      enabled: true
+      interval_range_s:
+      - 3.0
+      - 6.0
+      kind: body_force_pulse
+      body_name: torso_link
+      duration_range_s:
+      - 0.3
+      - 0.5
+      force_abs_range_n:
+      - 0.0
+      - 10.0
+    base_com:
+      enabled: true
+      ranges:
+        0:
+        - -0.075
+        - 0.075
+        1:
+        - -0.075
+        - 0.075
+        2:
+        - -0.075
+        - 0.075
+    base_mass:
+      enabled: true
+      body_names:
+      - torso_link
+      ranges:
+      - -1.0
+      - 1.0
+    encoder_bias:
+      enabled: true
+      bias_range:
+      - -0.01
+      - 0.01
+    foot_friction:
+      enabled: true
+      ranges:
+      - 0.3
+      - 2.0
+      shared_random: true
+    motor_params_implicit:
+      enabled: true
+      term: motor_params_implicit
+      mode: startup
+      params:
+        mode: uniform
+        armature_range:
+          .*:
+          - 0.8
+          - 1.2
+  terminations:
+  - name: time_out
+    term: time_out
+    time_out: true
+  - name: anchor_pos
+    term: bad_anchor_pos_z_only
+    params:
+      command_name: motion
+      threshold: 0.5
+      anchor_body_name: pelvis
+  - name: anchor_ori
+    term: bad_anchor_ori
+    params:
+      command_name: motion
+      threshold: 0.8
+      anchor_body_name: pelvis
+      asset_cfg:
+        entity_name: robot
+  - name: ee_body_pos
+    term: bad_motion_body_pos_z_only
+    params:
+      command_name: motion
+      threshold: 0.5
+      body_names:
+      - left_ankle_roll_link
+      - right_ankle_roll_link
+      - left_wrist_yaw_link
+      - right_wrist_yaw_link
+      anchor_body_name: pelvis
+  agent_overrides:
+    obs_groups:
+      actor:
+      - robot_root_quat
+      - estimator_history
+      - reference_encoder_input
+      - robot_key_body
+      critic:
+      - policy
+      - priv
+    critic:
+      class_name: sp_tracking.tasks.tracking.rl.heft_models:HeftTeacherCritic
+      hidden_dims:
+      - 1024
+      - 512
+      - 512
+      activation: mish
+      obs_normalization: true
+      vecnorm_decay: 0.9999
+    actor:
+      class_name: sp_tracking.tasks.tracking.rl.spv5_2_models:SPV52HeightContactEstimatorActor
+      estimator_hidden_dims:
+      - 512
+      - 256
+      - 128
+      estimator_activation: elu
+      actor_core_group: actor_core
+      estimator_history_group: estimator_history
+      estimator_target_group: estimator_target
+      estimator_history_length: 50
+      policy_history_length: 5
+      robot_key_body_group: robot_key_body
+      ref_key_body_group: ref_key_body
+      key_body_error_group: key_body_error
+      reference_encoder_hidden_dims:
+      - 512
+      - 256
+      - 128
+      reference_encoder_activation: elu
+      robot_root_quat_group: robot_root_quat
+      reference_encoder_input_group: reference_encoder_input
+      reference_encoder_target_group: reference_encoder_target
+      reference_fps: 50.0
+      keypoint_specs:
+      - name: left_hip
+        body_name: left_hip_yaw_link
+      - name: left_knee
+        body_name: left_knee_link
+      - name: left_foot
+        body_name: left_ankle_roll_link
+      - name: right_hip
+        body_name: right_hip_yaw_link
+      - name: right_knee
+        body_name: right_knee_link
+      - name: right_foot
+        body_name: right_ankle_roll_link
+      - name: head
+        body_name: torso_link
+        local_pos:
+        - 0.01
+        - 0.0
+        - 0.41
+      - name: left_shoulder
+        body_name: left_shoulder_yaw_link
+      - name: left_wrist
+        body_name: left_wrist_roll_link
+      - name: left_hand
+        body_name: left_wrist_yaw_link
+        local_pos:
+        - 0.116
+        - 0.0
+        - 0.0
+        correction_body_name: left_wrist_pitch_link
+        correction_local_pos:
+        - 0.005
+        - 0.0
+        - 0.0
+      - name: right_shoulder
+        body_name: right_shoulder_yaw_link
+      - name: right_wrist
+        body_name: right_wrist_roll_link
+      - name: right_hand
+        body_name: right_wrist_yaw_link
+        local_pos:
+        - 0.116
+        - 0.0
+        - 0.0
+        correction_body_name: right_wrist_pitch_link
+        correction_local_pos:
+        - 0.005
+        - 0.0
+        - 0.0
+      foot_contact_target_group: foot_contact_target
+    algorithm:
+      class_name: sp_tracking.tasks.tracking.rl.ppo:SPV52HeightContactEstimatorPPO
+      actor_learning_rate: 0.001
+      critic_learning_rate: 0.0005
+      estimator_learning_rate: 5.0e-05
+      estimator_root_height_loss_coef: 1.0
+      estimator_root_lin_vel_loss_coef: 1.0
+      reference_encoder_loss_coef: 1.0
+      adaptive_critic_learning_rate: false
+      use_checkpoint_estimator_learning_rate: false
+      estimator_foot_contact_loss_coef: 0.1
+    check_for_nan: false
+  metrics:
+    substep_tracking_cache:
+      term: substep_tracking_cache
+      params:
+        sensor_name: contact_forces
+        joint_torque_sensor_prefix: spv1_joint_torque_
+      per_substep: true
+      reduce: last
+seed: 42
+total_frames: null
+debug: false
+headless: true
+log_root: logs/rsl_rl
+gpu_ids:
+- 0
+motion_path: /data_zcy/wxy/motion_data_correct/
+launch_script_path: /data_zcy/wxy/SP_Tracking/scripts/train_tracking_bfm_multigpu.sh
+registry_name: null
+video: false
+video_length: 200
+video_interval: 2000
+enable_nan_guard: false
+checkpoint_path: /data_zcy/wxy/SP_Tracking/logs/rsl_rl/g1_tracking/2026-09-03_03-20-54_SPTracking-G1-BFM-SPV5-2AActor-HEFTCritic-HEFTReward_8gpu_12288env_motion_data_correct/checkpoint_64000.pt
+task_id: SPTracking-G1-BFM-SPV5-2AActor-HEFTCritic-HEFTReward

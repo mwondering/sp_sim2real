@@ -1,0 +1,38 @@
+{
+  "format": "motion_tracking_sim2real_policy",
+  "run_name": "SPTracking-G1-BFM-SPV5-2AActor-HEFTCritic-HEFTReward_8gpu_12288env_motion_data_correct",
+  "iteration": 74000,
+  "checkpoint": "checkpoint_74000.pt",
+  "in_keys": [
+    "spv5_2_observation"
+  ],
+  "out_keys": [
+    "action"
+  ],
+  "in_shapes": [
+    [
+      [
+        1,
+        8199
+      ]
+    ]
+  ],
+  "num_actions": 29,
+  "anchor_body_name": "pelvis",
+  "body_names": [
+    "pelvis",
+    "left_hip_yaw_link",
+    "left_knee_link",
+    "left_ankle_roll_link",
+    "right_hip_yaw_link",
+    "right_knee_link",
+    "right_ankle_roll_link",
+    "torso_link",
+    "left_shoulder_yaw_link",
+    "left_wrist_roll_link",
+    "left_wrist_yaw_link",
+    "right_shoulder_yaw_link",
+    "right_wrist_roll_link",
+    "right_wrist_yaw_link"
+  ]
+}

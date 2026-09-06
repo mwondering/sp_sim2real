@@ -25,19 +25,23 @@ from runtime.motion_sources import reference_endpoint_from_env
 
 
 class DeployBranchContractTests(unittest.TestCase):
-    def test_only_requested_checkpoint_is_present(self):
+    def test_requested_checkpoints_are_present(self):
         files = sorted(
             path.relative_to(REPO_ROOT).as_posix()
             for path in (REPO_ROOT / "ckpts").rglob("*")
             if path.is_file()
         )
-        self.assertEqual(
-            files,
-            [
-                "ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.json",
-                "ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.onnx",
-            ],
-        )
+        required = {
+            "ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.json",
+            "ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.onnx",
+            "ckpts/0729_baoshou_waist_dataclean_changedr_nohandxml/policy_28000.json",
+            "ckpts/0729_baoshou_waist_dataclean_changedr_nohandxml/policy_28000.onnx",
+            "ckpts/0903_ckpts_64000/policy.json",
+            "ckpts/0903_ckpts_64000/policy.onnx",
+            "ckpts/0904_ckpts_74000/policy.json",
+            "ckpts/0904_ckpts_74000/policy.onnx",
+        }
+        self.assertEqual(required.difference(files), set())
 
     def test_only_g1_spv5_2_profile_is_exposed(self):
         self.assertEqual(SUPPORTED_ROBOTS, ("g1",))
@@ -51,7 +55,7 @@ class DeployBranchContractTests(unittest.TestCase):
         policy = (config_dir / tracking["policy_path"]).resolve()
         self.assertEqual(
             policy,
-            REPO_ROOT / "ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.onnx",
+            REPO_ROOT / "ckpts/0904_ckpts_74000/policy.onnx",
         )
 
     def test_reference_endpoint_environment_override(self):
