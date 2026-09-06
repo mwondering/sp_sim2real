@@ -1,0 +1,18 @@
+[project]
+name = "g1-pico-reference-server"
+version = "0.1.0"
+description = "Isolated onboard PICO, G1 retargeting, and motion visualization runtime"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+  "mink>=1.1.0",
+  "mjviser>=0.0.11",
+  "mujoco",
+  "numpy",
+  "pyyaml",
+  "pyzmq>=27.1.0",
+  "scipy",
+]
+
+[tool.uv]
+# Keep native XR/retarget packages isolated from the policy environment.
+package = false

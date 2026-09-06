@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -60,6 +61,47 @@ class DeployBranchContractTests(unittest.TestCase):
             policy,
             REPO_ROOT / "ckpts/0904_ckpts_74000/policy.onnx",
         )
+
+    def test_mimiclite_style_onboard_pico_assets_are_self_contained(self):
+        required = (
+            SIM2REAL_ROOT / "venv/pico/pyproject.toml",
+            SIM2REAL_ROOT / "venv/pico/uv.lock",
+            SIM2REAL_ROOT / "install_xrobottoolkit_sdk.sh",
+            SIM2REAL_ROOT / "scripts/run_reference_server.sh",
+            SIM2REAL_ROOT / "teleop/serve_xrobot_teleop.py",
+            SIM2REAL_ROOT / "teleop/serve_motion_reference.py",
+            SIM2REAL_ROOT / "teleop/motion_select.py",
+            SIM2REAL_ROOT / "config/g1/retarget/xrobot_to_g1.json",
+        )
+        self.assertEqual([str(path) for path in required if not path.is_file()], [])
+
+        teleop = yaml.safe_load(
+            (SIM2REAL_ROOT / "config/g1/retarget/teleop.yaml").read_text()
+        )
+        self.assertEqual(teleop["retarget"]["actual_human_height"], 1.80)
+        alignment = teleop["retarget"]["height_alignment"]
+        self.assertEqual(alignment["target_z"], 0.01)
+        self.assertEqual(alignment["bootstrap_frames"], 30)
+        self.assertTrue(teleop["server"]["visualize"])
+
+    def test_deploy_launcher_exposes_onboard_pico_and_visual_motion_modes(self):
+        launcher = SIM2REAL_ROOT / "scripts/launch_deploy.sh"
+        result = subprocess.run(
+            ["bash", str(launcher), "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("--onboard-pico", result.stdout)
+        self.assertIn("motion-vis", result.stdout)
+        self.assertIn("--no-viewer", result.stdout)
+
+        launcher_text = launcher.read_text()
+        self.assertIn("REFERENCE_HOST=127.0.0.1", launcher_text)
+        self.assertIn('REF_BUFFER_DELAY_S="${REF_BUFFER_DELAY_S:-0.0}"', launcher_text)
+        self.assertIn('RETARGET_LOOKBACK_MS="${RETARGET_LOOKBACK_MS:-0.0}"', launcher_text)
+        self.assertIn("xr-service", launcher_text)
+        self.assertIn("reference", launcher_text)
 
     def test_reference_endpoint_environment_override(self):
         clean = {

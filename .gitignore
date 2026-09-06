@@ -125,6 +125,10 @@ celerybeat.pid
 .venv_depth/
 env/
 venv/
+!sim2real/venv/
+!sim2real/venv/pico/
+!sim2real/venv/pico/pyproject.toml
+!sim2real/venv/pico/uv.lock
 ENV/
 env.bak/
 venv.bak/

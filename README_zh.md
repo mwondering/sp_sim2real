@@ -1,6 +1,8 @@
 # G1 SPV5-2 Deploy 分支
 
-本分支只保留 G1 SPV5-2 的 sim2sim 与 sim2real 部署。默认策略为：
+本分支提供 G1 SPV5-2 的 sim2sim 与 sim2real 部署，并参考 MimicLite 支持把
+XRoboToolkit PC Service、PICO 接收、G1 retarget、策略推理和 bridge 全部放在 G1
+机载计算机上。默认策略为：
 
 ```text
 ckpts/0904_ckpts_74000/policy.onnx
@@ -12,10 +14,95 @@ ckpts/0904_ckpts_74000/policy.onnx
 ckpts/0729_baoshou_waist_dataclean_changedr_nohandxml/policy_28000.onnx
 ```
 
-默认模式仍由配套的 `pico` 分支通过三路 ZMQ TCP 发送 reference。为了排查无线链路延迟，
-本分支另提供显式开启的机载 motion 模式：policy 从仓库根目录 `motion/` 按需读取 NPZ，
-播放阶段直接使用本地内存中的 reference。策略与 bridge 之间的 `55001/55002` UDP 始终走
-本机回环，电机命令不经过 Wi-Fi。
+为了兼容已有流程，默认仍是外置 PICO reference；显式传入 `--onboard-pico` 才启用机载
+PICO。机载时 reference 三路 ZMQ 和策略/bridge 两路 UDP 都走 `127.0.0.1`，Wi-Fi 只承载
+PICO 到 G1 上 XR Service 的原始 XR 数据以及浏览器查看 MJViser，不再承载 retarget 后的
+逐帧策略 reference。
+
+## MimicLite 方式的机载 PICO、retarget 与可视化
+
+部署结构如下：
+
+```text
+PICO --Wi-Fi/LAN--> XR Service --local SDK--> retarget + MJViser
+                                             | 127.0.0.1:28701-28703
+                                             v
+                                      SPV5-2 policy
+                                             | 127.0.0.1:55001/55002
+                                             v
+                                      Unitree C++ bridge
+```
+
+与 MimicLite 一样，策略环境和 PICO/retarget 环境分离。先准备策略环境，再构建独立的
+`venv/pico`：
+
+```bash
+cd sim2real
+uv sync
+bash install_xrobottoolkit_sdk.sh
+```
+
+安装脚本会执行 `uv sync --project venv/pico`，并在当前架构上从源码构建
+`xrobotoolkit_sdk`。G1 ARM64 还需要预先安装与 JetPack/Ubuntu 匹配的 XRoboToolkit PC
+Service 软件包，确认下面的入口存在：
+
+```bash
+test -f /opt/apps/roboticsservice/runService.sh
+venv/pico/.venv/bin/python -c \
+  'import xrobotoolkit_sdk, mujoco, mink, mjviser; print("PICO runtime: OK")'
+```
+
+首次仍需构建 G1 bridge：
+
+```bash
+cd ../g1_sim2real
+G1_BRIDGE_BUILD_DIR=build_onboard bash scripts/build.sh
+```
+
+然后在 G1 上一条命令启动四个 tmux window：
+
+```bash
+cd ../sim2real
+VIEWER_URL_HOST=<G1局域网IP> \
+G1_DDS_IFACE=eth0 \
+bash scripts/launch_deploy.sh --real --onboard-pico
+```
+
+四个窗口分别是 `xr-service`、`reference`、`bridge`、`policy`。PICO 应连接 G1 上运行的
+XR Service。浏览器打开 `http://<G1局域网IP>:8080`，可同时查看人体坐标轴和 retarget 后
+的 G1；确认动作、脚底高度和朝向正确后，再按原有遥控器流程进入策略控制。
+
+当前操作员标定身高已设为 `1.80 m`。脚底高度采用 MimicLite 相同思路：启动前 30 帧标定
+固定 Z 偏移，目标最小脚部高度为 `0.01 m`，避免每帧强行贴地造成跳动。
+
+机载模式默认使用：
+
+```text
+RETARGET_LOOKBACK_MS=0.0
+REF_BUFFER_DELAY_S=0.0
+RETARGET_CPU_SET=0-1
+BRIDGE_CPU_SET=2-3
+POLICY_CPU_SET=4-7
+```
+
+外置 PICO 模式仍保留 YAML 中的 `0.5 s` 抗无线抖动缓冲，不受上述机载默认值影响。若机载
+链路出现算力抖动，可显式把 `REF_BUFFER_DELAY_S` 调为 `0.04` 或 `0.10`；测最低延迟或不需要
+查看动作时可加 `--no-viewer`。MJViser 默认仅以 5 Hz 刷新，不参与 50 Hz 策略控制环。
+
+## 带 MJViser 的机载 motion 回放
+
+新增的 `motion-vis` 模式让 reference server、selector、policy 都在 G1 上，并确保浏览器看到
+的 qpos 就是发给策略的 qpos：
+
+```bash
+cd sim2real
+MOTION_ROOT=../motion VIEWER_URL_HOST=<G1局域网IP> \
+bash scripts/launch_deploy.sh --real --source motion-vis
+```
+
+脚本创建 `reference`、`bridge`、`policy`、`motion-select` 四个窗口，不启动 XR Service。
+浏览器仍访问 `http://<G1局域网IP>:8080`。如果只追求最低播放开销、不需要可视化，继续用
+原来的 `--source motion`。
 
 ## 网络变量
 
@@ -53,7 +140,7 @@ uv run src/deploy.py --robot g1 --tracking-config tracking_spv5_2.yaml
 MuJoCo 窗口保持原键盘流程：`s` 进入默认姿态，等待 grounded PD hold 后按 `a`，按 `x`
 停止。reference motion 的网页可视化由 `pico` 分支提供。
 
-## G1 机载 sim2real
+## G1 机载 sim2real（外置 PICO 兼容模式）
 
 首次在 G1 ARM64 上构建 bridge：
 
@@ -62,7 +149,7 @@ cd g1_sim2real
 G1_BRIDGE_BUILD_DIR=build_onboard bash scripts/build.sh
 ```
 
-构建完成后，在 `deploy` 分支用一个脚本启动机载侧的两个 tmux window：
+构建完成后，可继续用原来的外置 PICO 方式启动机载侧两个 tmux window：
 
 ```bash
 cd sim2real
@@ -113,8 +200,9 @@ taskset -c 4-7 uv run src/deploy.py \
   --robot g1 --tracking-config tracking_spv5_2.yaml
 ```
 
-配套的 `pico` 分支使用 `sim2real/scripts/launch_pico.sh` 启动外部主机侧的
-`xr-service` 和 `reference`。两台机器各启动一个分支脚本，总计四个 tmux window。
+配套的 `pico` 分支仍可使用 `sim2real/scripts/launch_pico.sh` 启动外部主机侧的
+`xr-service` 和 `reference`。这条兼容路径仍需两台机器；新部署建议使用上面的
+`--onboard-pico`。
 
 ## 机载 motion 模式（延迟对照）
 

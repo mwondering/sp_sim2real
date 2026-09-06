@@ -629,9 +629,21 @@ class VRMotionSource(MotionSourceBase):
             default=str(vr_cfg["ctrl_addr"]),
             port_env="G1_REF_CTRL_PORT",
         )
-        self.vr_low_watermark = int(vr_cfg["low_watermark"])
-        self.vr_inflight_lifetime_steps = int(vr_cfg["inflight_lifetime_steps"])
-        self.vr_buffer_delay_s = float(vr_cfg.get("buffer_delay_s", 0.0))
+        self.vr_low_watermark = int(
+            os.environ.get("G1_REF_LOW_WATERMARK", vr_cfg["low_watermark"])
+        )
+        self.vr_inflight_lifetime_steps = int(
+            os.environ.get(
+                "G1_REF_INFLIGHT_LIFETIME_STEPS",
+                vr_cfg["inflight_lifetime_steps"],
+            )
+        )
+        self.vr_buffer_delay_s = float(
+            os.environ.get(
+                "G1_REF_BUFFER_DELAY_S",
+                vr_cfg.get("buffer_delay_s", 0.0),
+            )
+        )
         self.vr_buffer_delay_frames = self._delay_to_frames(
             self.vr_buffer_delay_s,
             float(getattr(policy_cfg, "reference_fps")),

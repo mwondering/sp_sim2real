@@ -1,18 +1,36 @@
-# G1 SPV5-2 deploy branch
+# G1 SPV5-2 deployment
 
-This branch contains only the SPV5-2 policy runtime for G1:
+This branch contains the G1 SPV5-2 sim2sim/sim2real runtime and now supports
+the MimicLite-style onboard PICO layout:
 
-- default checkpoint: `ckpts/0904_ckpts_74000/policy.onnx`
-- additional checkpoint: `ckpts/0729_baoshou_waist_dataclean_changedr_nohandxml/policy_28000.onnx`
-- desktop MuJoCo sim2sim with visualization
-- G1 onboard policy inference and the C++ Unitree bridge
-- remote PICO/motion references supplied by the companion `pico` branch
-- optional onboard NPZ playback with `launch_deploy.sh --source motion`; the
-  wireless PICO source remains the default
+- policy inference and the C++ Unitree bridge run on the G1;
+- XRoboToolkit PC Service and PICO-to-G1 retargeting can run on the same G1;
+- the retarget process includes a LAN-accessible MJViser view;
+- policy/retarget and policy/bridge traffic stays on `127.0.0.1`;
+- the existing external-PICO and direct onboard-NPZ modes remain available.
 
-For one-shot host motion playback, press G1 remote A once to enter policy
-control. Each host selection starts automatically when the local default
-reference is ready; after completion, the same policy transitions back to its
-default reference and remains active for the next selection.
+The default policy is `ckpts/0904_ckpts_74000/policy.onnx`.
 
-See [README_zh.md](README_zh.md) for deployment commands and network settings.
+Quick start after completing the ARM64 setup in
+[README_zh.md](README_zh.md):
+
+```bash
+cd sim2real
+VIEWER_URL_HOST=<g1-ip> bash scripts/launch_deploy.sh --real --onboard-pico
+```
+
+Open `http://<g1-ip>:8080` to inspect the live human skeleton and retargeted
+G1 motion before enabling policy control.
+
+For visualized NPZ playback:
+
+```bash
+bash scripts/launch_deploy.sh --real --source motion-vis
+```
+
+For the lowest-overhead onboard NPZ path, keep using
+`--source motion`. For an external PICO host, keep using
+`REFERENCE_HOST=<host-ip> ... --source pico`.
+
+See [README_zh.md](README_zh.md) for setup, process layout, controls, ports,
+latency settings, and Jetson notes.
