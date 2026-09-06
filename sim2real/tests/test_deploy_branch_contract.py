@@ -102,6 +102,11 @@ class DeployBranchContractTests(unittest.TestCase):
         self.assertIn('RETARGET_LOOKBACK_MS="${RETARGET_LOOKBACK_MS:-0.0}"', launcher_text)
         self.assertIn("xr-service", launcher_text)
         self.assertIn("reference", launcher_text)
+        self.assertIn("--noprofile --norc", launcher_text)
+        # send-keys remains only for delivering Ctrl-C during --stop; process
+        # startup must use tmux shell-command so interactive ROS prompts cannot
+        # consume the launch command.
+        self.assertEqual(launcher_text.count("tmux send-keys"), 1)
 
     def test_reference_endpoint_environment_override(self):
         clean = {

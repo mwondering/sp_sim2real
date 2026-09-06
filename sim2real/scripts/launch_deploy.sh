@@ -418,29 +418,47 @@ append_env BRIDGE_CPU_SET "${BRIDGE_CPU_SET}"
 append_env POLICY_CPU_SET "${POLICY_CPU_SET}"
 printf -v script_path '%q' "${SCRIPT_DIR}/launch_deploy.sh"
 
-tmux new-session -d -s "${SESSION}" -n bridge
-tmux new-window -t "${SESSION}" -n policy
+component_command() {
+  local component_quoted
+  printf -v component_quoted '%q' "$1"
+  # Supplying a tmux shell-command makes its parent shell non-interactive.
+  # The explicit bash flags also prevent machine-specific ROS prompts in
+  # ~/.bashrc or profile files from consuming the deployment command.
+  printf '%sexec bash --noprofile --norc %s --%s --component %s' \
+    "${common_env}" "${script_path}" "${TARGET}" "${component_quoted}"
+}
+
+first_component=bridge
 if "${USE_XR_SERVICE}"; then
-  tmux new-window -t "${SESSION}" -n xr-service
+  first_component=xr-service
+elif "${USE_ONBOARD_REFERENCE}"; then
+  first_component=reference
 fi
-if "${USE_ONBOARD_REFERENCE}"; then
-  tmux new-window -t "${SESSION}" -n reference
-fi
-if [[ "${SOURCE_MODE}" == "motion" || "${SOURCE_MODE}" == "motion-vis" ]]; then
-  tmux new-window -t "${SESSION}" -n motion-select
-fi
+tmux new-session -d -s "${SESSION}" -n "${first_component}" \
+  "$(component_command "${first_component}")"
+tmux set-window-option -t "${SESSION}:${first_component}" remain-on-exit on
 tmux set-option -t "${SESSION}" mouse on
 
+create_component_window() {
+  local component="$1"
+  if [[ "${component}" == "${first_component}" ]]; then
+    return
+  fi
+  tmux new-window -d -t "${SESSION}" -n "${component}" \
+    "$(component_command "${component}")"
+  tmux set-window-option -t "${SESSION}:${component}" remain-on-exit on 2>/dev/null || true
+}
+
 if "${USE_XR_SERVICE}"; then
-  tmux send-keys -t "${SESSION}:xr-service" "${common_env}bash ${script_path} --${TARGET} --component xr-service" C-m
+  create_component_window xr-service
 fi
 if "${USE_ONBOARD_REFERENCE}"; then
-  tmux send-keys -t "${SESSION}:reference" "${common_env}bash ${script_path} --${TARGET} --component reference" C-m
+  create_component_window reference
 fi
-tmux send-keys -t "${SESSION}:bridge" "${common_env}bash ${script_path} --${TARGET} --component bridge" C-m
-tmux send-keys -t "${SESSION}:policy" "${common_env}bash ${script_path} --${TARGET} --component policy" C-m
+create_component_window bridge
+create_component_window policy
 if [[ "${SOURCE_MODE}" == "motion" || "${SOURCE_MODE}" == "motion-vis" ]]; then
-  tmux send-keys -t "${SESSION}:motion-select" "${common_env}bash ${script_path} --${TARGET} --component motion-select" C-m
+  create_component_window motion-select
   tmux select-window -t "${SESSION}:motion-select"
 elif "${USE_ONBOARD_REFERENCE}"; then
   tmux select-window -t "${SESSION}:reference"

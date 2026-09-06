@@ -71,6 +71,8 @@ bash scripts/launch_deploy.sh --real --onboard-pico
 四个窗口分别是 `xr-service`、`reference`、`bridge`、`policy`。PICO 应连接 G1 上运行的
 XR Service。浏览器打开 `http://<G1局域网IP>:8080`，可同时查看人体坐标轴和 retarget 后
 的 G1；确认动作、脚底高度和朝向正确后，再按原有遥控器流程进入策略控制。
+launcher 在创建 tmux window 时直接执行 `bash --noprofile --norc`，因此不会触发 Unitree
+系统交互式 shell 中的 `ros:foxy(1) noetic(2) ?`，也不会再把部署命令误当作 ROS 选项。
 
 当前操作员标定身高已设为 `1.80 m`。脚底高度采用 MimicLite 相同思路：启动前 30 帧标定
 固定 Z 偏移，目标最小脚部高度为 `0.01 m`，避免每帧强行贴地造成跳动。
