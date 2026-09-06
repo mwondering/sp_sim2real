@@ -109,6 +109,50 @@ class DeployBranchContractTests(unittest.TestCase):
         # consume the launch command.
         self.assertEqual(launcher_text.count("tmux send-keys"), 1)
 
+    def test_xr_service_component_keeps_vendor_binary_in_foreground(self):
+        launcher = SIM2REAL_ROOT / "scripts/launch_deploy.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            pico_python = temp_root / "pico/.venv/bin/python"
+            pico_python.parent.mkdir(parents=True)
+            pico_python.write_text("#!/bin/sh\nexit 0\n")
+            pico_python.chmod(0o755)
+
+            service_dir = temp_root / "roboticsservice"
+            service_dir.mkdir()
+            service_script = service_dir / "runService.sh"
+            service_script.write_text("#!/bin/sh\necho wrapper-invoked\n")
+            service_script.chmod(0o755)
+            service_bin = service_dir / "RoboticsServiceProcess"
+            service_bin.write_text(
+                "#!/bin/sh\n"
+                "echo foreground-service\n"
+                "echo LD_LIBRARY_PATH=$LD_LIBRARY_PATH\n"
+                "exit 23\n"
+            )
+            service_bin.chmod(0o755)
+
+            env = dict(os.environ)
+            env.update(
+                {
+                    "SOURCE_MODE": "pico",
+                    "PICO_RUNTIME": "onboard",
+                    "PICO_PROJECT_DIR": str(temp_root / "pico"),
+                    "XR_SERVICE_SCRIPT": str(service_script),
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(launcher), "--sim", "--component", "xr-service"],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertIn("foreground-service", result.stdout)
+            self.assertNotIn("wrapper-invoked", result.stdout)
+            self.assertIn(str(service_dir / "SDK/arm64"), result.stdout)
+
     def test_reference_endpoint_environment_override(self):
         clean = {
             key: value

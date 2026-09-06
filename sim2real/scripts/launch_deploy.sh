@@ -19,6 +19,7 @@ REF_BUFFER_DELAY_S="${REF_BUFFER_DELAY_S:-}"
 RETARGET_LOOKBACK_MS="${RETARGET_LOOKBACK_MS:-}"
 PICO_PROJECT_DIR="${PICO_PROJECT_DIR:-${REPO_ROOT}/sim2real/venv/pico}"
 XR_SERVICE_SCRIPT="${XR_SERVICE_SCRIPT:-/opt/apps/roboticsservice/runService.sh}"
+XR_SERVICE_BIN="${XR_SERVICE_BIN:-}"
 VIEWER_ENABLED="${VIEWER_ENABLED:-true}"
 VIEWER_BIND_IP="${VIEWER_BIND_IP:-0.0.0.0}"
 VIEWER_PORT="${VIEWER_PORT:-8080}"
@@ -78,7 +79,7 @@ Options:
 
 Important environment variables:
   SESSION, REFERENCE_HOST, VR_REQ_PORT, VR_POSE_PORT, VR_CTRL_PORT,
-  PICO_RUNTIME, PICO_PROJECT_DIR, XR_SERVICE_SCRIPT,
+  PICO_RUNTIME, PICO_PROJECT_DIR, XR_SERVICE_SCRIPT, XR_SERVICE_BIN,
   REF_BUFFER_DELAY_S, RETARGET_LOOKBACK_MS,
   VIEWER_BIND_IP, VIEWER_PORT, VIEWER_URL_HOST,
   MOTION_ROOT, MOTION_SELECT_HOST, MOTION_SELECT_PORT,
@@ -227,6 +228,13 @@ if "${USE_XR_SERVICE}" && [[ "${COMPONENT}" == "" || "${COMPONENT}" == "xr-servi
     echo "Install the ARM64 XRoboToolkit PC Service package first" >&2
     exit 1
   fi
+  xr_service_dir="$(dirname "${XR_SERVICE_SCRIPT}")"
+  xr_service_bin="${XR_SERVICE_BIN:-${xr_service_dir}/RoboticsServiceProcess}"
+  if [[ ! -x "${xr_service_bin}" ]]; then
+    echo "XRoboToolkit service binary not found or not executable: ${xr_service_bin}" >&2
+    echo "Install the ARM64 XRoboToolkit PC Service package first" >&2
+    exit 1
+  fi
 fi
 
 run_bridge() {
@@ -279,11 +287,26 @@ run_xr_service() {
     echo "xr-service is available only in onboard PICO mode" >&2
     exit 2
   fi
-  cd "$(dirname "${XR_SERVICE_SCRIPT}")"
-  if [[ -n "${XR_SERVICE_CPU_SET}" ]]; then
-    exec taskset -c "${XR_SERVICE_CPU_SET}" bash "${XR_SERVICE_SCRIPT}"
+  local service_dir
+  service_dir="$(cd "$(dirname "${XR_SERVICE_SCRIPT}")" && pwd)"
+  local service_bin="${XR_SERVICE_BIN:-${service_dir}/RoboticsServiceProcess}"
+
+  # The vendor ARM64 runService.sh backgrounds RoboticsServiceProcess and then
+  # exits successfully. Running the binary in the foreground keeps tmux, Ctrl-C,
+  # and service lifetime coupled while preserving the wrapper's runtime paths.
+  local service_library_path="${service_dir}:${service_dir}/lib:${service_dir}/SDK/arm64"
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    service_library_path="${LD_LIBRARY_PATH}:${service_library_path}"
   fi
-  exec bash "${XR_SERVICE_SCRIPT}"
+  export LD_LIBRARY_PATH="${service_library_path}"
+  export QT_PLUGIN_PATH="${service_dir}/plugins/${QT_PLUGIN_PATH:+:${QT_PLUGIN_PATH}}"
+  export QT_QML_PATH="${service_dir}/qml/${QT_QML_PATH:+:${QT_QML_PATH}}"
+
+  cd "${service_dir}"
+  if [[ -n "${XR_SERVICE_CPU_SET}" ]]; then
+    exec taskset -c "${XR_SERVICE_CPU_SET}" "${service_bin}"
+  fi
+  exec "${service_bin}"
 }
 
 run_reference() {
@@ -400,6 +423,7 @@ append_env REF_BUFFER_DELAY_S "${REF_BUFFER_DELAY_S}"
 append_env RETARGET_LOOKBACK_MS "${RETARGET_LOOKBACK_MS}"
 append_env PICO_PROJECT_DIR "${PICO_PROJECT_DIR}"
 append_env XR_SERVICE_SCRIPT "${XR_SERVICE_SCRIPT}"
+append_env XR_SERVICE_BIN "${XR_SERVICE_BIN}"
 append_env VIEWER_ENABLED "${VIEWER_ENABLED}"
 append_env VIEWER_BIND_IP "${VIEWER_BIND_IP}"
 append_env VIEWER_PORT "${VIEWER_PORT}"

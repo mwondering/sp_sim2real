@@ -71,6 +71,9 @@ bash scripts/launch_deploy.sh --real --onboard-pico
 四个窗口分别是 `xr-service`、`reference`、`bridge`、`policy`。PICO 应连接 G1 上运行的
 XR Service。浏览器打开 `http://<G1局域网IP>:8080`，可同时查看人体坐标轴和 retarget 后
 的 G1；确认动作、脚底高度和朝向正确后，再按原有遥控器流程进入策略控制。
+launcher 会直接以前台方式运行 `RoboticsServiceProcess`，避免官方 `runService.sh` 将
+服务放入后台后立即返回、导致 tmux 显示 `Pane is dead (status 0)`；此时 Ctrl-C 也会
+直接停止 XR Service。
 launcher 在创建 tmux window 时直接执行 `bash --noprofile --norc`，因此不会触发 Unitree
 系统交互式 shell 中的 `ros:foxy(1) noetic(2) ?`，也不会再把部署命令误当作 ROS 选项。
 
