@@ -258,6 +258,52 @@ class PolicyMetadataFallbackTests(unittest.TestCase):
             self.assertEqual(metadata["action_scale"], [0.5])
 
 
+class VRBufferingTests(unittest.TestCase):
+    @staticmethod
+    def _frame(value: float = 0.0):
+        return {
+            "joint_pos": np.full(29, value, dtype=np.float32),
+            "root_pos": np.asarray([value, 0.0, 0.76], dtype=np.float32),
+            "root_quat": np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        }
+
+    def test_half_second_delay_is_25_frames_at_50_hz(self):
+        self.assertEqual(VRMotionSource._delay_to_frames(0.5, 50.0), 25)
+        self.assertEqual(VRMotionSource._delay_to_frames(0.001, 50.0), 1)
+        with self.assertRaisesRegex(ValueError, "buffer_delay_s"):
+            VRMotionSource._delay_to_frames(-0.1, 50.0)
+
+    def test_start_holds_anchor_until_delay_buffer_is_consumed(self):
+        source = object.__new__(VRMotionSource)
+        source._target_future_horizon = 7
+        source.vr_buffer_delay_frames = 25
+        source.policy = SimpleNamespace(ref_len=1, ref_idx=0)
+        appended = []
+
+        def append_ref_frames(segment):
+            appended.append(segment)
+            source.policy.ref_len += int(segment["joint_pos"].shape[0])
+
+        source.policy.append_ref_frames = append_ref_frames
+        source._pad_future_once_on_start(self._frame())
+
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(appended[0]["joint_pos"].shape, (25, 29))
+        self.assertEqual(source._future_horizon(), 25)
+
+    def test_buffer_capacity_preserves_original_reply_burst(self):
+        source = object.__new__(VRMotionSource)
+        source._vr_buffer_high_watermark = 35
+        source.policy = SimpleNamespace(ref_len=26, ref_idx=0)
+        source._vr_stats = source._new_vr_stats()
+        frames = [self._frame(float(i)) for i in range(12)]
+
+        kept = source._appendable_reply_frames(frames)
+
+        self.assertEqual(len(kept), 10)
+        self.assertEqual(source._vr_stats["drop_frames"], 2)
+
+
 class RemoteMotionLifecycleTests(unittest.TestCase):
     def test_new_host_motion_sequence_is_queued_once(self):
         source = object.__new__(VRMotionSource)

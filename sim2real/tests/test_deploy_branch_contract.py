@@ -51,6 +51,7 @@ class DeployBranchContractTests(unittest.TestCase):
         tracking = yaml.safe_load((config_dir / tracking_files[0]).read_text())
         self.assertEqual(tracking["actor_profile"], "spv5_2")
         self.assertEqual(tracking["motion_source"]["type"], "vr")
+        self.assertEqual(tracking["motion_source"]["vr"]["buffer_delay_s"], 0.5)
         self.assertNotIn("motions", tracking)
         policy = (config_dir / tracking["policy_path"]).resolve()
         self.assertEqual(

@@ -51,6 +51,8 @@ motion_source:
     req_addr: "tcp://127.0.0.1:28701"
     rep_addr: "tcp://127.0.0.1:28702"
     ctrl_addr: "tcp://127.0.0.1:28703"
+    # Hold 25 reference frames at 50 Hz to absorb short wireless stalls.
+    buffer_delay_s: 0.5
     low_watermark: 7
     high_watermark: 10
     inflight_lifetime_steps: 0
