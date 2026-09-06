@@ -103,7 +103,7 @@ class DeployBranchContractTests(unittest.TestCase):
         launcher_text = launcher.read_text()
         self.assertIn("REFERENCE_HOST=127.0.0.1", launcher_text)
         self.assertIn('REF_BUFFER_DELAY_S="${REF_BUFFER_DELAY_S:-0.0}"', launcher_text)
-        self.assertIn('RETARGET_LOOKBACK_MS="${RETARGET_LOOKBACK_MS:-0.0}"', launcher_text)
+        self.assertIn('RETARGET_LOOKBACK_MS="${RETARGET_LOOKBACK_MS:-50.0}"', launcher_text)
         self.assertIn("xr-service", launcher_text)
         self.assertIn("reference", launcher_text)
         self.assertIn("--noprofile --norc", launcher_text)

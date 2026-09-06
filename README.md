@@ -28,6 +28,10 @@ VIEWER_URL_HOST=<g1-ip> bash scripts/launch_deploy.sh --real --onboard-pico
 Open `http://<g1-ip>:8080` to inspect the live human skeleton and retargeted
 G1 motion before enabling policy control.
 
+Onboard PICO mode defaults to a 50 ms retarget lookback, enabling linear joint
+interpolation and root-quaternion Slerp while leaving the extra reference FIFO
+delay disabled. Set `RETARGET_LOOKBACK_MS=0` only for explicit latency tests.
+
 For visualized NPZ playback:
 
 ```bash

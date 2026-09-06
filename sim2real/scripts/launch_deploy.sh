@@ -159,10 +159,11 @@ case "${SOURCE_MODE}" in
       USE_XR_SERVICE=true
       REFERENCE_SOURCE_MODE=pico
       REFERENCE_HOST=127.0.0.1
-      # MimicLite uses latest-only local transport. Remove wireless jitter
-      # buffering and the retarget lookback by default for the onboard path.
+      # Keep the extra reference FIFO delay disabled on the local path, but
+      # preserve a retarget lookback so the ring buffer resamples qpos at a
+      # stable timestamp (linear joint interpolation + root quaternion Slerp).
       REF_BUFFER_DELAY_S="${REF_BUFFER_DELAY_S:-0.0}"
-      RETARGET_LOOKBACK_MS="${RETARGET_LOOKBACK_MS:-0.0}"
+      RETARGET_LOOKBACK_MS="${RETARGET_LOOKBACK_MS:-50.0}"
     elif [[ "${TARGET}" == "sim" && -z "${REFERENCE_HOST}" ]]; then
       REFERENCE_HOST=127.0.0.1
     fi
