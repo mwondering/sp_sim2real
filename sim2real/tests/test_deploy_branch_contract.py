@@ -59,7 +59,8 @@ class DeployBranchContractTests(unittest.TestCase):
         policy = (config_dir / tracking["policy_path"]).resolve()
         self.assertEqual(
             policy,
-            REPO_ROOT / "ckpts/0904_ckpts_74000/policy.onnx",
+            REPO_ROOT
+            / "ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.onnx",
         )
 
     def test_mimiclite_style_onboard_pico_assets_are_self_contained(self):

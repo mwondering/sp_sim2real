@@ -5,7 +5,7 @@ XRoboToolkit PC Service、PICO 接收、G1 retarget、策略推理和 bridge 全
 机载计算机上。默认策略为：
 
 ```text
-ckpts/0904_ckpts_74000/policy.onnx
+ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.onnx
 ```
 
 同时保留原始的兼容策略及其 JSON 元数据，便于切换和对照测试：

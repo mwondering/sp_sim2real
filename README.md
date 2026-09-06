@@ -9,7 +9,8 @@ the MimicLite-style onboard PICO layout:
 - policy/retarget and policy/bridge traffic stays on `127.0.0.1`;
 - the existing external-PICO and direct onboard-NPZ modes remain available.
 
-The default policy is `ckpts/0904_ckpts_74000/policy.onnx`.
+The default policy is
+`ckpts/0728_baoshou_waist_dataclean_changedr/policy_22000.onnx`.
 
 Quick start after completing the ARM64 setup in
 [README_zh.md](README_zh.md):
