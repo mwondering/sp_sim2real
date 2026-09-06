@@ -15,7 +15,6 @@ REFERENCE_BIND_IP="${REFERENCE_BIND_IP:-127.0.0.1}"
 VR_REQ_PORT="${VR_REQ_PORT:-28701}"
 VR_POSE_PORT="${VR_POSE_PORT:-28702}"
 VR_CTRL_PORT="${VR_CTRL_PORT:-28703}"
-REF_BUFFER_DELAY_S="${REF_BUFFER_DELAY_S:-}"
 RETARGET_LOOKBACK_MS="${RETARGET_LOOKBACK_MS:-}"
 PICO_PROJECT_DIR="${PICO_PROJECT_DIR:-${REPO_ROOT}/sim2real/venv/pico}"
 XR_SERVICE_SCRIPT="${XR_SERVICE_SCRIPT:-/opt/apps/roboticsservice/runService.sh}"
@@ -80,7 +79,7 @@ Options:
 Important environment variables:
   SESSION, REFERENCE_HOST, VR_REQ_PORT, VR_POSE_PORT, VR_CTRL_PORT,
   PICO_RUNTIME, PICO_PROJECT_DIR, XR_SERVICE_SCRIPT, XR_SERVICE_BIN,
-  REF_BUFFER_DELAY_S, RETARGET_LOOKBACK_MS,
+  RETARGET_LOOKBACK_MS,
   VIEWER_BIND_IP, VIEWER_PORT, VIEWER_URL_HOST,
   MOTION_ROOT, MOTION_SELECT_HOST, MOTION_SELECT_PORT,
   MOTION_REFERENCE_SELECT_PORT, STATE_PORT, CMD_PORT,
@@ -159,10 +158,8 @@ case "${SOURCE_MODE}" in
       USE_XR_SERVICE=true
       REFERENCE_SOURCE_MODE=pico
       REFERENCE_HOST=127.0.0.1
-      # Keep the extra reference FIFO delay disabled on the local path, but
-      # preserve a retarget lookback so the ring buffer resamples qpos at a
-      # stable timestamp (linear joint interpolation + root quaternion Slerp).
-      REF_BUFFER_DELAY_S="${REF_BUFFER_DELAY_S:-0.0}"
+      # Resample qpos at a stable timestamp using linear joint interpolation
+      # and root quaternion Slerp.
       RETARGET_LOOKBACK_MS="${RETARGET_LOOKBACK_MS:-50.0}"
     elif [[ "${TARGET}" == "sim" && -z "${REFERENCE_HOST}" ]]; then
       REFERENCE_HOST=127.0.0.1
@@ -178,7 +175,6 @@ case "${SOURCE_MODE}" in
     USE_ONBOARD_REFERENCE=true
     REFERENCE_SOURCE_MODE=motion
     REFERENCE_HOST=127.0.0.1
-    REF_BUFFER_DELAY_S="${REF_BUFFER_DELAY_S:-0.0}"
     ;;
 esac
 
@@ -311,9 +307,6 @@ run_policy() {
     "G1_STATE_PORT=${STATE_PORT}"
     "G1_CMD_PORT=${CMD_PORT}"
   )
-  if [[ -n "${REF_BUFFER_DELAY_S}" ]]; then
-    command+=("G1_REF_BUFFER_DELAY_S=${REF_BUFFER_DELAY_S}")
-  fi
   if [[ "${TARGET}" == "real" ]]; then
     command+=(taskset -c "${POLICY_CPU_SET}")
   fi
@@ -456,7 +449,6 @@ append_env REFERENCE_BIND_IP "${REFERENCE_BIND_IP}"
 append_env VR_REQ_PORT "${VR_REQ_PORT}"
 append_env VR_POSE_PORT "${VR_POSE_PORT}"
 append_env VR_CTRL_PORT "${VR_CTRL_PORT}"
-append_env REF_BUFFER_DELAY_S "${REF_BUFFER_DELAY_S}"
 append_env RETARGET_LOOKBACK_MS "${RETARGET_LOOKBACK_MS}"
 append_env PICO_PROJECT_DIR "${PICO_PROJECT_DIR}"
 append_env XR_SERVICE_SCRIPT "${XR_SERVICE_SCRIPT}"

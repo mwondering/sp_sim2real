@@ -258,7 +258,7 @@ class PolicyMetadataFallbackTests(unittest.TestCase):
             self.assertEqual(metadata["action_scale"], [0.5])
 
 
-class VRBufferingTests(unittest.TestCase):
+class VRReferenceQueueTests(unittest.TestCase):
     @staticmethod
     def _frame(value: float = 0.0):
         return {
@@ -267,16 +267,9 @@ class VRBufferingTests(unittest.TestCase):
             "root_quat": np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
         }
 
-    def test_half_second_delay_is_25_frames_at_50_hz(self):
-        self.assertEqual(VRMotionSource._delay_to_frames(0.5, 50.0), 25)
-        self.assertEqual(VRMotionSource._delay_to_frames(0.001, 50.0), 1)
-        with self.assertRaisesRegex(ValueError, "buffer_delay_s"):
-            VRMotionSource._delay_to_frames(-0.1, 50.0)
-
-    def test_start_holds_anchor_until_delay_buffer_is_consumed(self):
+    def test_start_bootstraps_only_the_model_future_horizon(self):
         source = object.__new__(VRMotionSource)
         source._target_future_horizon = 7
-        source.vr_buffer_delay_frames = 25
         source.policy = SimpleNamespace(ref_len=1, ref_idx=0)
         appended = []
 
@@ -288,8 +281,8 @@ class VRBufferingTests(unittest.TestCase):
         source._pad_future_once_on_start(self._frame())
 
         self.assertEqual(len(appended), 1)
-        self.assertEqual(appended[0]["joint_pos"].shape, (25, 29))
-        self.assertEqual(source._future_horizon(), 25)
+        self.assertEqual(appended[0]["joint_pos"].shape, (7, 29))
+        self.assertEqual(source._future_horizon(), 7)
 
     def test_reference_fifo_never_drops_unconsumed_frames(self):
         policy = object.__new__(TrackingPolicyRaw)

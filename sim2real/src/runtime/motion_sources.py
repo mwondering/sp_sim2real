@@ -638,24 +638,10 @@ class VRMotionSource(MotionSourceBase):
                 vr_cfg["inflight_lifetime_steps"],
             )
         )
-        self.vr_buffer_delay_s = float(
-            os.environ.get(
-                "G1_REF_BUFFER_DELAY_S",
-                vr_cfg.get("buffer_delay_s", 0.0),
-            )
-        )
-        self.vr_buffer_delay_frames = self._delay_to_frames(
-            self.vr_buffer_delay_s,
-            float(getattr(policy_cfg, "reference_fps")),
-        )
         # The policy reference arrays are the lossless FIFO: received frames are
         # appended at the tail and ref_idx consumes one frame per control step.
-        # This watermark only decides when to request more data; it is never a
-        # capacity limit and no valid received frame is discarded.
-        self._vr_request_low_watermark = max(
-            self.vr_low_watermark,
-            self.vr_buffer_delay_frames,
-        )
+        # The low watermark only decides when to request more data; it is never
+        # an additional delay or capacity limit, and no valid frame is dropped.
         self.vr_start_button = str(
             vr_cfg.get("start_button", "right_key_one")
         ).strip()
@@ -737,9 +723,6 @@ class VRMotionSource(MotionSourceBase):
                 f"req->{self.vr_req_addr}, rep<-{self.vr_rep_addr}, "
                 f"ctrl<-{self.vr_ctrl_addr}, low_watermark={self.vr_low_watermark}, "
                 f"inflight_lifetime_steps={self.vr_inflight_lifetime_steps}, "
-                f"buffer_delay={self.vr_buffer_delay_s:.3f}s/"
-                f"{self.vr_buffer_delay_frames}frames, "
-                f"refill_watermark={self._vr_request_low_watermark}, "
                 "queue=lossless-fifo"
             )
         except Exception as e:
@@ -765,18 +748,6 @@ class VRMotionSource(MotionSourceBase):
             "ignore_inactive": 0,
             "ignore_no_aligned": 0,
         }
-
-    @staticmethod
-    def _delay_to_frames(delay_s: float, reference_fps: float) -> int:
-        delay = float(delay_s)
-        fps = float(reference_fps)
-        if not np.isfinite(delay) or delay < 0.0:
-            raise ValueError("vr.buffer_delay_s must be finite and >= 0")
-        if not np.isfinite(fps) or fps <= 0.0:
-            raise ValueError("reference_fps must be finite and > 0")
-        # Round upward so a fractional-frame request never provides less than
-        # the configured amount of jitter absorption.
-        return int(np.ceil(delay * fps))
 
     def _bump_vr_stat(self, key: str, value: int = 1) -> None:
         self._vr_stats[key] = int(self._vr_stats[key] or 0) + int(value)
@@ -1047,13 +1018,9 @@ class VRMotionSource(MotionSourceBase):
         }
 
     def _pad_future_once_on_start(self, frame: Dict[str, np.ndarray]) -> None:
-        startup_horizon = max(
-            self._target_future_horizon,
-            self.vr_buffer_delay_frames,
-        )
-        if startup_horizon <= 0:
+        if self._target_future_horizon <= 0:
             return
-        deficit = int(startup_horizon - self._future_horizon())
+        deficit = int(self._target_future_horizon - self._future_horizon())
         if deficit > 0:
             self.policy.append_ref_frames(self._repeat_frame(frame, deficit))
 
@@ -1338,9 +1305,7 @@ class VRMotionSource(MotionSourceBase):
         if self._req_inflight:
             return
         h = self._future_horizon()
-        should_request = (
-            h <= self._vr_request_low_watermark
-        ) or self._pending_start_request
+        should_request = (h <= self.vr_low_watermark) or self._pending_start_request
         if not should_request:
             return
         start_flag = bool(self._pending_start_request)

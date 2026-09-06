@@ -113,18 +113,16 @@ launcher 在创建 tmux window 时直接执行 `bash --noprofile --norc`，因�
 
 ```text
 RETARGET_LOOKBACK_MS=50.0
-REF_BUFFER_DELAY_S=0.0
 RETARGET_CPU_SET=0-1
 BRIDGE_CPU_SET=2-3
 POLICY_CPU_SET=4-7
 ```
 
-机载 PICO 默认恢复 `50 ms` retarget lookback，对关节位置做线性插值、对根姿态做 Slerp；
-额外 reference FIFO 延迟仍为 `0`。策略自身要求至少保留 7 个未来帧（约 `0.14 s`），因此
-`REF_BUFFER_DELAY_S` 只有大于 `0.14` 时才会继续增加抗抖动深度，例如可用 `0.16` 或 `0.20`。
-外置 PICO 模式仍保留 YAML 中的 `0.5 s` 缓冲，不受机载默认值影响。测最低延迟时可显式设置
-`RETARGET_LOOKBACK_MS=0`；不需要查看动作时可加 `--no-viewer`。MJViser 默认仅以 5 Hz 刷新，
-不参与 50 Hz 策略控制环。
+机载 PICO 默认恢复 `50 ms` retarget lookback，对关节位置做线性插值、对根姿态做 Slerp。
+后来增加的可配置 reference FIFO 延迟缓冲已经移除。策略自身仍要求保留 7 个未来帧
+（约 `0.14 s`），这是 ONNX 输入的前视窗口，不是额外的延迟 buffer。测最低延迟时可显式
+设置 `RETARGET_LOOKBACK_MS=0`；不需要查看动作时可加 `--no-viewer`。MJViser 默认仅以 5 Hz
+刷新，不参与 50 Hz 策略控制环。
 
 ## 带 MJViser 的机载 motion 回放
 

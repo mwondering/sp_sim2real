@@ -52,7 +52,7 @@ class DeployBranchContractTests(unittest.TestCase):
         tracking = yaml.safe_load((config_dir / tracking_files[0]).read_text())
         self.assertEqual(tracking["actor_profile"], "spv5_2")
         self.assertEqual(tracking["motion_source"]["type"], "vr")
-        self.assertEqual(tracking["motion_source"]["vr"]["buffer_delay_s"], 0.5)
+        self.assertNotIn("buffer_delay_s", tracking["motion_source"]["vr"])
         self.assertEqual(tracking["motion_source"]["vr"]["inflight_lifetime_steps"], 25)
         self.assertNotIn("high_watermark", tracking["motion_source"]["vr"])
         self.assertNotIn("motions", tracking)
@@ -102,7 +102,7 @@ class DeployBranchContractTests(unittest.TestCase):
 
         launcher_text = launcher.read_text()
         self.assertIn("REFERENCE_HOST=127.0.0.1", launcher_text)
-        self.assertIn('REF_BUFFER_DELAY_S="${REF_BUFFER_DELAY_S:-0.0}"', launcher_text)
+        self.assertNotIn("REF_BUFFER_DELAY_S", launcher_text)
         self.assertIn('RETARGET_LOOKBACK_MS="${RETARGET_LOOKBACK_MS:-50.0}"', launcher_text)
         self.assertIn("xr-service", launcher_text)
         self.assertIn("reference", launcher_text)
