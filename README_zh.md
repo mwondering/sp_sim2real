@@ -43,11 +43,39 @@ bash install_xrobottoolkit_sdk.sh
 ```
 
 安装脚本会执行 `uv sync --project venv/pico`，并在当前架构上从源码构建
-`xrobotoolkit_sdk`。G1 ARM64 还需要预先安装与 JetPack/Ubuntu 匹配的 XRoboToolkit PC
-Service 软件包，确认下面的入口存在：
+`xrobotoolkit_sdk`。Unitree G1 使用 Ubuntu 20.04 / JetPack 5，XRoboToolkit PC Service
+必须使用 [MimicLite shared artifacts](https://drive.google.com/drive/folders/1lrPyiiy7anyG3P4wHNIQQQlydboLPd9e)
+中的兼容包，不能使用上游 generic/headless ARM64 包：
+
+```text
+third_party/prebuilt/jetpack5-aarch64/xrobotservice/
+  XRoboToolkit-PC-Service_1.0.0.0_arm64_ubuntu20.04.deb
+```
+
+把兼容包放到上述目录，然后安装；也可以把 `.deb` 的实际路径作为第一个参数传入：
+
+```bash
+cd sim2real
+bash install_xrobottoolkit_pc_service.sh --download
+# 或：bash install_xrobottoolkit_pc_service.sh /path/to/package.deb
+```
+
+`--download` 使用固定 Google Drive 文件 ID，并校验约 68 MB 归档和内部 `.deb` 的
+SHA-256；无参数时优先使用上述本地文件，文件不存在则自动进入相同的下载流程。G1 需要
+走反向代理时可加：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:17890 \
+bash install_xrobottoolkit_pc_service.sh --download
+```
+
+安装器会在覆盖 `/opt/apps/roboticsservice` 之前解包，并使用 G1 本机动态加载器检查 ICU、
+GLIBC 和 GLIBCXX。若仍依赖 `libicuuc.so.70` 或 `GLIBC_2.34`，安装会被拒绝。不要将
+`libicuuc.so.66` 伪装链接为 `.so.70`。安装后确认下面的入口存在：
 
 ```bash
 test -f /opt/apps/roboticsservice/runService.sh
+test -x /opt/apps/roboticsservice/RoboticsServiceProcess
 venv/pico/.venv/bin/python -c \
   'import xrobotoolkit_sdk, mujoco, mink, mjviser; print("PICO runtime: OK")'
 ```
@@ -73,7 +101,8 @@ XR Service。浏览器打开 `http://<G1局域网IP>:8080`，可同时查看人�
 的 G1；确认动作、脚底高度和朝向正确后，再按原有遥控器流程进入策略控制。
 launcher 会直接以前台方式运行 `RoboticsServiceProcess`，避免官方 `runService.sh` 将
 服务放入后台后立即返回、导致 tmux 显示 `Pane is dead (status 0)`；此时 Ctrl-C 也会
-直接停止 XR Service。
+直接停止 XR Service。创建 tmux 前还会执行动态依赖预检；不兼容时会直接指出缺失库和
+Ubuntu 20.04 兼容包名称，不再等到 pane 以 `status 127` 退出。
 launcher 在创建 tmux window 时直接执行 `bash --noprofile --norc`，因此不会触发 Unitree
 系统交互式 shell 中的 `ros:foxy(1) noetic(2) ?`，也不会再把部署命令误当作 ROS 选项。
 

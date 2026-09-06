@@ -222,6 +222,43 @@ require_pico_environment() {
 if "${USE_ONBOARD_REFERENCE}" && [[ "${COMPONENT}" != "bridge" && "${COMPONENT}" != "policy" ]]; then
   require_pico_environment
 fi
+
+xr_service_library_path() {
+  local service_dir="$1"
+  local library_path="${service_dir}:${service_dir}/lib:${service_dir}/SDK/arm64"
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    library_path="${LD_LIBRARY_PATH}:${library_path}"
+  fi
+  printf '%s' "${library_path}"
+}
+
+check_xr_service_runtime() {
+  local service_dir="$1"
+  local service_bin="$2"
+  local library_path
+  library_path="$(xr_service_library_path "${service_dir}")"
+  local ldd_output
+  local ldd_status=0
+
+  set +e
+  ldd_output="$(env LD_LIBRARY_PATH="${library_path}" ldd "${service_bin}" 2>&1)"
+  ldd_status=$?
+  set -e
+
+  if (( ldd_status != 0 )) || grep -Eq \
+      'not found|cannot open shared object file' <<<"${ldd_output}"; then
+    echo "XRoboToolkit PC Service is incompatible with this system:" >&2
+    printf '%s\n' "${ldd_output}" >&2
+    echo >&2
+    echo "G1 Ubuntu 20.04 requires:" >&2
+    echo "  XRoboToolkit-PC-Service_1.0.0.0_arm64_ubuntu20.04.deb" >&2
+    echo "Do not symlink libicuuc.so.66 to libicuuc.so.70." >&2
+    echo "Install the compatible package with:" >&2
+    echo "  bash install_xrobottoolkit_pc_service.sh /path/to/package.deb" >&2
+    exit 1
+  fi
+}
+
 if "${USE_XR_SERVICE}" && [[ "${COMPONENT}" == "" || "${COMPONENT}" == "xr-service" ]]; then
   if [[ ! -f "${XR_SERVICE_SCRIPT}" ]]; then
     echo "XRoboToolkit service launcher not found: ${XR_SERVICE_SCRIPT}" >&2
@@ -235,6 +272,7 @@ if "${USE_XR_SERVICE}" && [[ "${COMPONENT}" == "" || "${COMPONENT}" == "xr-servi
     echo "Install the ARM64 XRoboToolkit PC Service package first" >&2
     exit 1
   fi
+  check_xr_service_runtime "${xr_service_dir}" "${xr_service_bin}"
 fi
 
 run_bridge() {
@@ -294,10 +332,8 @@ run_xr_service() {
   # The vendor ARM64 runService.sh backgrounds RoboticsServiceProcess and then
   # exits successfully. Running the binary in the foreground keeps tmux, Ctrl-C,
   # and service lifetime coupled while preserving the wrapper's runtime paths.
-  local service_library_path="${service_dir}:${service_dir}/lib:${service_dir}/SDK/arm64"
-  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
-    service_library_path="${LD_LIBRARY_PATH}:${service_library_path}"
-  fi
+  local service_library_path
+  service_library_path="$(xr_service_library_path "${service_dir}")"
   export LD_LIBRARY_PATH="${service_library_path}"
   export QT_PLUGIN_PATH="${service_dir}/plugins/${QT_PLUGIN_PATH:+:${QT_PLUGIN_PATH}}"
   export QT_QML_PATH="${service_dir}/qml/${QT_QML_PATH:+:${QT_QML_PATH}}"

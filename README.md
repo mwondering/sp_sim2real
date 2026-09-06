@@ -15,6 +15,11 @@ The default policy is
 Quick start after completing the ARM64 setup in
 [README_zh.md](README_zh.md):
 
+G1 Ubuntu 20.04 requires the MimicLite JetPack 5 package named
+`XRoboToolkit-PC-Service_1.0.0.0_arm64_ubuntu20.04.deb`. The generic/headless
+upstream ARM64 package is not runtime-compatible. The setup and launcher now
+validate dynamic dependencies before installation and before tmux startup.
+
 ```bash
 cd sim2real
 VIEWER_URL_HOST=<g1-ip> bash scripts/launch_deploy.sh --real --onboard-pico

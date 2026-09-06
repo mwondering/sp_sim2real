@@ -68,6 +68,9 @@ class DeployBranchContractTests(unittest.TestCase):
             SIM2REAL_ROOT / "venv/pico/pyproject.toml",
             SIM2REAL_ROOT / "venv/pico/uv.lock",
             SIM2REAL_ROOT / "install_xrobottoolkit_sdk.sh",
+            SIM2REAL_ROOT / "install_xrobottoolkit_pc_service.sh",
+            SIM2REAL_ROOT
+            / "third_party/prebuilt/jetpack5-aarch64/xrobotservice/README.md",
             SIM2REAL_ROOT / "scripts/run_reference_server.sh",
             SIM2REAL_ROOT / "teleop/serve_xrobot_teleop.py",
             SIM2REAL_ROOT / "teleop/serve_motion_reference.py",
@@ -132,9 +135,16 @@ class DeployBranchContractTests(unittest.TestCase):
             )
             service_bin.chmod(0o755)
 
+            tool_dir = temp_root / "tools"
+            tool_dir.mkdir()
+            fake_ldd = tool_dir / "ldd"
+            fake_ldd.write_text("#!/bin/sh\nexit 0\n")
+            fake_ldd.chmod(0o755)
+
             env = dict(os.environ)
             env.update(
                 {
+                    "PATH": f"{tool_dir}:{env['PATH']}",
                     "SOURCE_MODE": "pico",
                     "PICO_RUNTIME": "onboard",
                     "PICO_PROJECT_DIR": str(temp_root / "pico"),
@@ -152,6 +162,73 @@ class DeployBranchContractTests(unittest.TestCase):
             self.assertIn("foreground-service", result.stdout)
             self.assertNotIn("wrapper-invoked", result.stdout)
             self.assertIn(str(service_dir / "SDK/arm64"), result.stdout)
+
+    def test_xr_service_dependency_mismatch_fails_before_tmux_or_execution(self):
+        launcher = SIM2REAL_ROOT / "scripts/launch_deploy.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            pico_python = temp_root / "pico/.venv/bin/python"
+            pico_python.parent.mkdir(parents=True)
+            pico_python.write_text("#!/bin/sh\nexit 0\n")
+            pico_python.chmod(0o755)
+
+            service_dir = temp_root / "roboticsservice"
+            service_dir.mkdir()
+            service_script = service_dir / "runService.sh"
+            service_script.write_text("#!/bin/sh\nexit 0\n")
+            service_script.chmod(0o755)
+            service_bin = service_dir / "RoboticsServiceProcess"
+            service_bin.write_text("#!/bin/sh\necho must-not-run\n")
+            service_bin.chmod(0o755)
+
+            tool_dir = temp_root / "tools"
+            tool_dir.mkdir()
+            fake_ldd = tool_dir / "ldd"
+            fake_ldd.write_text(
+                "#!/bin/sh\n"
+                "echo 'libicuuc.so.70 => not found'\n"
+                "exit 0\n"
+            )
+            fake_ldd.chmod(0o755)
+
+            env = dict(os.environ)
+            env.update(
+                {
+                    "PATH": f"{tool_dir}:{env['PATH']}",
+                    "SOURCE_MODE": "pico",
+                    "PICO_RUNTIME": "onboard",
+                    "PICO_PROJECT_DIR": str(temp_root / "pico"),
+                    "XR_SERVICE_SCRIPT": str(service_script),
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(launcher), "--sim", "--component", "xr-service"],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("libicuuc.so.70 => not found", result.stderr)
+            self.assertIn(
+                "XRoboToolkit-PC-Service_1.0.0.0_arm64_ubuntu20.04.deb",
+                result.stderr,
+            )
+            self.assertNotIn("must-not-run", result.stdout)
+
+    def test_ubuntu20_xr_service_installer_documents_validated_package(self):
+        installer = SIM2REAL_ROOT / "install_xrobottoolkit_pc_service.sh"
+        result = subprocess.run(
+            ["bash", str(installer), "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("Ubuntu 20.04/aarch64 runtime linker", result.stdout)
+        self.assertIn(
+            "XRoboToolkit-PC-Service_1.0.0.0_arm64_ubuntu20.04.deb",
+            result.stdout,
+        )
 
     def test_reference_endpoint_environment_override(self):
         clean = {
