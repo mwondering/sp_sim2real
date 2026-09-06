@@ -52,6 +52,8 @@ class DeployBranchContractTests(unittest.TestCase):
         self.assertEqual(tracking["actor_profile"], "spv5_2")
         self.assertEqual(tracking["motion_source"]["type"], "vr")
         self.assertEqual(tracking["motion_source"]["vr"]["buffer_delay_s"], 0.5)
+        self.assertEqual(tracking["motion_source"]["vr"]["inflight_lifetime_steps"], 25)
+        self.assertNotIn("high_watermark", tracking["motion_source"]["vr"])
         self.assertNotIn("motions", tracking)
         policy = (config_dir / tracking["policy_path"]).resolve()
         self.assertEqual(

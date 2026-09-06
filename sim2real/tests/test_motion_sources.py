@@ -23,7 +23,7 @@ from runtime.motion_sources import (
     VRMotionSource,
     discover_motion_files,
 )
-from runtime.policy import _load_policy_metadata
+from runtime.policy import TrackingPolicyRaw, _load_policy_metadata
 
 
 MUJOCO_G1_JOINT_NAMES = (
@@ -291,18 +291,35 @@ class VRBufferingTests(unittest.TestCase):
         self.assertEqual(appended[0]["joint_pos"].shape, (25, 29))
         self.assertEqual(source._future_horizon(), 25)
 
-    def test_buffer_capacity_preserves_original_reply_burst(self):
-        source = object.__new__(VRMotionSource)
-        source._vr_buffer_high_watermark = 35
-        source.policy = SimpleNamespace(ref_len=26, ref_idx=0)
-        source._vr_stats = source._new_vr_stats()
-        frames = [self._frame(float(i)) for i in range(12)]
+    def test_reference_fifo_never_drops_unconsumed_frames(self):
+        policy = object.__new__(TrackingPolicyRaw)
+        policy.n_joints = 1
+        policy.ref_joint_pos = None
+        policy.ref_root_quat = None
+        policy.ref_root_pos = None
+        policy.ref_idx = 0
+        policy.ref_len = 0
+        policy.current_done = True
+        policy.future_history_len = 0
+        policy.switch_tail_keep_steps = 0
+        policy.ref_max_len = 4
+        frame_count = 10
+        policy.append_ref_frames(
+            {
+                "joint_pos": np.arange(frame_count, dtype=np.float32).reshape(-1, 1),
+                "root_pos": np.zeros((frame_count, 3), dtype=np.float32),
+                "root_quat": np.tile(
+                    np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+                    (frame_count, 1),
+                ),
+            }
+        )
 
-        kept = source._appendable_reply_frames(frames)
-
-        self.assertEqual(len(kept), 10)
-        self.assertEqual(source._vr_stats["drop_frames"], 2)
-
+        self.assertEqual(policy.ref_len, frame_count)
+        np.testing.assert_array_equal(
+            policy.ref_joint_pos[:, 0],
+            np.arange(frame_count, dtype=np.float32),
+        )
 
 class RemoteMotionLifecycleTests(unittest.TestCase):
     def test_new_host_motion_sequence_is_queued_once(self):

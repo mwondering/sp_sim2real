@@ -54,8 +54,8 @@ motion_source:
     # Hold 25 reference frames at 50 Hz to absorb short wireless stalls.
     buffer_delay_s: 0.5
     low_watermark: 7
-    high_watermark: 10
-    inflight_lifetime_steps: 0
+    # Retry an unanswered request after 0.5 s instead of queueing one per frame.
+    inflight_lifetime_steps: 25
 
 motion_clips:
   - name: "default"

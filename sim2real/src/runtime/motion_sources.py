@@ -630,25 +630,19 @@ class VRMotionSource(MotionSourceBase):
             port_env="G1_REF_CTRL_PORT",
         )
         self.vr_low_watermark = int(vr_cfg["low_watermark"])
-        self.vr_high_watermark = int(vr_cfg["high_watermark"])
         self.vr_inflight_lifetime_steps = int(vr_cfg["inflight_lifetime_steps"])
         self.vr_buffer_delay_s = float(vr_cfg.get("buffer_delay_s", 0.0))
         self.vr_buffer_delay_frames = self._delay_to_frames(
             self.vr_buffer_delay_s,
             float(getattr(policy_cfg, "reference_fps")),
         )
-        # Keep the configured watermarks as the policy lookahead reserve, and
-        # place the jitter buffer in front of them.  The first remote frame is
-        # delayed by ``vr_buffer_delay_frames``; the extra high-water capacity
-        # accepts the same reply bursts as before without dropping them.
+        # The policy reference arrays are the lossless FIFO: received frames are
+        # appended at the tail and ref_idx consumes one frame per control step.
+        # This watermark only decides when to request more data; it is never a
+        # capacity limit and no valid received frame is discarded.
         self._vr_request_low_watermark = max(
             self.vr_low_watermark,
             self.vr_buffer_delay_frames,
-        )
-        self._vr_buffer_high_watermark = (
-            self.vr_high_watermark + self.vr_buffer_delay_frames
-            if self.vr_high_watermark > 0
-            else 0
         )
         self.vr_start_button = str(
             vr_cfg.get("start_button", "right_key_one")
@@ -663,9 +657,6 @@ class VRMotionSource(MotionSourceBase):
             raise ValueError("VR start_button and stop_button must differ")
         if self.vr_inflight_lifetime_steps < 0:
             raise ValueError("vr_inflight_lifetime_steps must be >= 0")
-        if self.vr_high_watermark > 0 and self.vr_high_watermark < self.vr_low_watermark:
-            raise ValueError("vr_high_watermark must be >= vr_low_watermark when enabled")
-
         self._vr_active = False
         self._vr_in_transition = False
         self._vr_transition_count = 0
@@ -736,8 +727,8 @@ class VRMotionSource(MotionSourceBase):
                 f"inflight_lifetime_steps={self.vr_inflight_lifetime_steps}, "
                 f"buffer_delay={self.vr_buffer_delay_s:.3f}s/"
                 f"{self.vr_buffer_delay_frames}frames, "
-                f"buffer_watermarks={self._vr_request_low_watermark}/"
-                f"{self._vr_buffer_high_watermark}"
+                f"refill_watermark={self._vr_request_low_watermark}, "
+                "queue=lossless-fifo"
             )
         except Exception as e:
             self._req_sock = None
@@ -755,9 +746,6 @@ class VRMotionSource(MotionSourceBase):
             "append_frames": 0,
             "pad": 0,
             "pad_frames": 0,
-            "drop_full": 0,
-            "drop_excess": 0,
-            "drop_frames": 0,
             "horizon_low": 0,
             "horizon_min": None,
             "ignore_non_start": 0,
@@ -805,8 +793,6 @@ class VRMotionSource(MotionSourceBase):
             f"rep_frames={int(stats['rep_frames'])}, "
             f"append={int(stats['append'])}, append_frames={int(stats['append_frames'])}, "
             f"pad={int(stats['pad'])}, pad_frames={int(stats['pad_frames'])}, "
-            f"drop_full={int(stats['drop_full'])}, drop_excess={int(stats['drop_excess'])}, "
-            f"drop_frames={int(stats['drop_frames'])}, "
             f"horizon_low={int(stats['horizon_low'])}, horizon_min={horizon_msg}, "
             f"ignore_non_start={int(stats['ignore_non_start'])}, "
             f"drop_delayed_start={int(stats['drop_delayed_start'])}, "
@@ -1067,22 +1053,6 @@ class VRMotionSource(MotionSourceBase):
         self._bump_vr_stat("pad")
         self._bump_vr_stat("pad_frames", deficit)
 
-    def _appendable_reply_frames(self, frames: list[Dict[str, np.ndarray]]) -> list[Dict[str, np.ndarray]]:
-        if self._vr_buffer_high_watermark <= 0:
-            return frames
-        h_now = self._future_horizon()
-        if h_now >= self._vr_buffer_high_watermark:
-            self._bump_vr_stat("drop_full")
-            self._bump_vr_stat("drop_frames", len(frames))
-            return []
-        capacity = int(self._vr_buffer_high_watermark - h_now)
-        kept = frames[:capacity]
-        dropped = max(0, len(frames) - len(kept))
-        if dropped > 0:
-            self._bump_vr_stat("drop_excess")
-            self._bump_vr_stat("drop_frames", dropped)
-        return kept
-
     def _warn_horizon_if_needed(self, tag: str) -> None:
         if self._target_future_horizon <= 0:
             return
@@ -1304,7 +1274,6 @@ class VRMotionSource(MotionSourceBase):
                 aligned = self._align_vr_frame(f)
                 if aligned is not None:
                     out_frames.append(self._apply_start_transition(aligned))
-            out_frames = self._appendable_reply_frames(out_frames)
             if len(out_frames) == 0:
                 self._bump_vr_stat("ignore_no_aligned")
                 if reply_source == "motion" and reply_finished:
